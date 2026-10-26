@@ -299,6 +299,151 @@ def render_question_card(question: DEMREQuestionNode, step_num: int, total_steps
             st.latex(opt.latex_content)
 
 
+def build_unit_exercise_queue_safe(
+    engine_inst: GoPAESAdaptiveEngine,
+    vector_store: GoPAESVectorStore,
+    exam: ExamType,
+    axis: ThematicAxis,
+    subtopic_keyword: str,
+    num_questions: int,
+    exclude_ids: list[str] | None = None,
+) -> list[DEMREQuestionNode]:
+    """
+    Extrae de forma segura `num_questions` ejercicios específicos para la unidad (`subtopic_keyword`).
+    Funciona incluso si en GitHub hay una versión anterior de `adaptive_engine.py`.
+    """
+    if hasattr(engine_inst, "build_unit_exercise_queue"):
+        return engine_inst.build_unit_exercise_queue(
+            vector_store=vector_store,
+            exam=exam,
+            axis=axis,
+            subtopic_keyword=subtopic_keyword,
+            num_questions=num_questions,
+            exclude_ids=exclude_ids,
+        )
+
+    excluded = set(exclude_ids or [])
+    axis_pool: list[DEMREQuestionNode] = vector_store.query_by_axis_and_exam(
+        exam=exam,
+        axis=axis,
+        exclude_ids=[],
+        diagnostic_only=False,
+    )
+    kw = (subtopic_keyword or "").strip().lower()
+
+    primary_matches = [
+        q for q in axis_pool
+        if (kw in q.subtopic_name.lower() or kw in q.stem_text.lower()) and q.node_id not in excluded
+    ]
+    secondary_matches = [
+        q for q in axis_pool
+        if (kw in q.subtopic_name.lower() or kw in q.stem_text.lower()) and q.node_id in excluded
+    ]
+    axis_unseen = [
+        q for q in axis_pool
+        if q.node_id not in excluded and q not in primary_matches
+    ]
+    axis_remaining = [
+        q for q in axis_pool
+        if q not in primary_matches and q not in secondary_matches and q not in axis_unseen
+    ]
+
+    combined: list[DEMREQuestionNode] = []
+    for candidate in (primary_matches + secondary_matches + axis_unseen + axis_remaining):
+        if candidate.node_id not in [c.node_id for c in combined]:
+            combined.append(candidate)
+        if len(combined) >= num_questions:
+            break
+
+    return combined[:num_questions]
+
+
+def _get_guide_short_desc(guide) -> str:
+    desc = getattr(guide, "short_description", "")
+    if desc:
+        return desc
+    return (
+        f"Guía oficial estructurada según el temario DEMRE para {guide.unit_title}. "
+        f"Incluye marco teórico, formulario en LaTeX, receta paso a paso y ejercicios de la unidad."
+    )
+
+
+def _get_guide_subtopic_kw(guide) -> str:
+    kw = getattr(guide, "subtopic_filter_keyword", "")
+    if kw:
+        return kw
+    title_low = guide.unit_title.lower()
+    if "porcentaje" in title_low:
+        return "porcentaje"
+    if "potencia" in title_low or "raíces" in title_low or "raices" in title_low:
+        return "potencias"
+    if "logaritmo" in title_low:
+        return "logaritmo"
+    if "interés" in title_low or "interes" in title_low or "matemática financiera" in title_low:
+        return "interés"
+    if "sistema" in title_low:
+        return "sistemas"
+    if "cuadrática" in title_low or "cuadratica" in title_low or "parábola" in title_low:
+        return "cuadrática"
+    if "lineal" in title_low or "afín" in title_low or "afin" in title_low or "proporción" in title_low:
+        return "lineal"
+    if "pitágoras" in title_low or "pitagoras" in title_low or "área" in title_low or "perímetro" in title_low:
+        return "pitágoras"
+    if "vector" in title_low or "isométrica" in title_low or "isometrica" in title_low:
+        return "isométrica"
+    if "homotecia" in title_low or "trigonometría" in title_low or "trigonometria" in title_low:
+        return "homotecia"
+    if "cuartil" in title_low or "promedio" in title_low or "estadística" in title_low:
+        return "estadística"
+    if "probabilidad" in title_low or "laplace" in title_low:
+        return "probabilidad"
+    if "condicional" in title_low or "combinatoria" in title_low or "dispersión" in title_low:
+        return "condicional"
+    return "enteros"
+
+
+def _ensure_multi_unit_guides(
+    guides_by_axis: dict[ThematicAxis, list[DEMREExhaustiveGuide]],
+    exam_target: ExamType,
+) -> dict[ThematicAxis, list[DEMREExhaustiveGuide]]:
+    """
+    Garantiza que si en GitHub aún está la versión anterior de `guides_data.py` (con 1 sola guía por eje),
+    se desglose automáticamente en múltiples unidades seleccionables en el menú intermedio.
+    """
+    num_list = guides_by_axis.get("NUMEROS", [])
+    if len(num_list) > 1:
+        return guides_by_axis
+
+    expanded: dict[ThematicAxis, list[DEMREExhaustiveGuide]] = {a: [] for a in ALL_AXES}
+    for axis, g_list in guides_by_axis.items():
+        if not g_list:
+            continue
+        base_g = g_list[0]
+        if len(base_g.key_formulas) >= 2:
+            # Dividir en Unidad A y Unidad B a partir de las fórmulas y ejercicios para que el menú tenga unidades separadas
+            mid_f = max(1, len(base_g.key_formulas) // 2)
+            u1 = base_g.model_copy(
+                update={
+                    "guide_id": f"{base_g.guide_id}-U1",
+                    "unit_title": f"Unidad 1: {base_g.key_formulas[0].title}",
+                    "key_formulas": base_g.key_formulas[:mid_f],
+                    "interleaved_exercises": base_g.interleaved_exercises[:1],
+                }
+            )
+            u2 = base_g.model_copy(
+                update={
+                    "guide_id": f"{base_g.guide_id}-U2",
+                    "unit_title": f"Unidad 2: {base_g.key_formulas[mid_f].title}",
+                    "key_formulas": base_g.key_formulas[mid_f:],
+                    "interleaved_exercises": base_g.interleaved_exercises[1:] or base_g.interleaved_exercises,
+                }
+            )
+            expanded[axis] = [u1, u2]
+        else:
+            expanded[axis] = [base_g]
+    return expanded
+
+
 def render_exhaustive_study_guides_section(exam_target: ExamType):
     """
     Renderiza la sección de Guías por Materia (PAES M1 o PAES M2) con arquitectura de 2 niveles:
@@ -324,7 +469,10 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
             st.session_state.selected_guide_id = None
             st.rerun()
 
-    guides_by_axis = get_exhaustive_guides_by_exam(exam_target)
+    guides_by_axis = _ensure_multi_unit_guides(
+        get_exhaustive_guides_by_exam(exam_target),
+        exam_target=exam_target,
+    )
 
     # Buscar si hay una guía actualmente seleccionada y que pertenezca a este examen (M1 o M2)
     active_guide: DEMREExhaustiveGuide | None = None
@@ -359,6 +507,9 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
         st.caption("Elige la unidad que quieres abrir o configura directamente una práctica de ejercicios para esa unidad:")
 
         for idx_g, guide in enumerate(axis_guides, start=1):
+            short_desc = _get_guide_short_desc(guide)
+            subtopic_kw = _get_guide_subtopic_kw(guide)
+
             with st.container(border=True):
                 col_info, col_actions = st.columns([3, 2])
 
@@ -372,8 +523,7 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                         unsafe_allow_html=True,
                     )
                     st.caption(f"📌 {guide.demre_syllabus_reference}")
-                    if guide.short_description:
-                        st.write(guide.short_description)
+                    st.write(short_desc)
                     st.markdown(
                         f"🧮 **{len(guide.key_formulas)}** Fórmulas $\\text{{LaTeX}}$ | "
                         f"🧑‍🍳 **{len(guide.resolution_recipe_steps)}** Pasos de Receta | "
@@ -410,11 +560,12 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                         ):
                             st.session_state.selected_guide_id = guide.guide_id
                             st.session_state.guide_active_tab = "UNIT_EXERCISES"
-                            st.session_state.unit_custom_workouts[guide.guide_id] = engine.build_unit_exercise_queue(
+                            st.session_state.unit_custom_workouts[guide.guide_id] = build_unit_exercise_queue_safe(
+                                engine_inst=engine,
                                 vector_store=st.session_state.vector_store,
                                 exam=guide.exam,
                                 axis=guide.thematic_axis,
-                                subtopic_keyword=guide.subtopic_filter_keyword,
+                                subtopic_keyword=subtopic_kw,
                                 num_questions=int(num_ex_menu),
                                 exclude_ids=st.session_state.asked_ids,
                             )
@@ -424,6 +575,8 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
     # =========================================================================
     # NIVEL 2: VISTA DETALLADA DE LA GUÍA ELEGIDA + PRÁCTICA PERSONALIZADA DE LA UNIDAD
     # =========================================================================
+    active_subtopic_kw = _get_guide_subtopic_kw(active_guide)
+
     col_back, col_unit_badge = st.columns([1, 3])
     with col_back:
         if st.button("⬅️ Volver al Menú de Guías", use_container_width=True):
@@ -554,11 +707,12 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                     use_container_width=True,
                     key=f"btn_gen_from_theory_{active_guide.guide_id}",
                 ):
-                    st.session_state.unit_custom_workouts[active_guide.guide_id] = engine.build_unit_exercise_queue(
+                    st.session_state.unit_custom_workouts[active_guide.guide_id] = build_unit_exercise_queue_safe(
+                        engine_inst=engine,
                         vector_store=st.session_state.vector_store,
                         exam=active_guide.exam,
                         axis=active_guide.thematic_axis,
-                        subtopic_keyword=active_guide.subtopic_filter_keyword,
+                        subtopic_keyword=active_subtopic_kw,
                         num_questions=int(qty_from_theory),
                         exclude_ids=st.session_state.asked_ids,
                     )
@@ -599,11 +753,12 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                     use_container_width=True,
                     key=f"btn_reload_inline_{active_guide.guide_id}",
                 ):
-                    st.session_state.unit_custom_workouts[active_guide.guide_id] = engine.build_unit_exercise_queue(
+                    st.session_state.unit_custom_workouts[active_guide.guide_id] = build_unit_exercise_queue_safe(
+                        engine_inst=engine,
                         vector_store=st.session_state.vector_store,
                         exam=active_guide.exam,
                         axis=active_guide.thematic_axis,
-                        subtopic_keyword=active_guide.subtopic_filter_keyword,
+                        subtopic_keyword=active_subtopic_kw,
                         num_questions=int(desired_qty),
                         exclude_ids=st.session_state.asked_ids,
                     )
@@ -615,11 +770,12 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                     use_container_width=True,
                     key=f"btn_launch_unit_exam_{active_guide.guide_id}",
                 ):
-                    queue_unit = engine.build_unit_exercise_queue(
+                    queue_unit = build_unit_exercise_queue_safe(
+                        engine_inst=engine,
                         vector_store=st.session_state.vector_store,
                         exam=active_guide.exam,
                         axis=active_guide.thematic_axis,
-                        subtopic_keyword=active_guide.subtopic_filter_keyword,
+                        subtopic_keyword=active_subtopic_kw,
                         num_questions=int(desired_qty),
                         exclude_ids=st.session_state.asked_ids,
                     )
@@ -638,11 +794,12 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
 
         # Si aún no hay lista cargada para esta guía, generarla automáticamente con `desired_qty`
         if active_guide.guide_id not in st.session_state.unit_custom_workouts:
-            st.session_state.unit_custom_workouts[active_guide.guide_id] = engine.build_unit_exercise_queue(
+            st.session_state.unit_custom_workouts[active_guide.guide_id] = build_unit_exercise_queue_safe(
+                engine_inst=engine,
                 vector_store=st.session_state.vector_store,
                 exam=active_guide.exam,
                 axis=active_guide.thematic_axis,
-                subtopic_keyword=active_guide.subtopic_filter_keyword,
+                subtopic_keyword=active_subtopic_kw,
                 num_questions=int(desired_qty),
                 exclude_ids=st.session_state.asked_ids,
             )
