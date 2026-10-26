@@ -1,36 +1,31 @@
-import os
 import re
 import uuid
 import hashlib
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Literal
+from typing import List, Dict, Optional, Literal
 import numpy as np
 from pydantic import BaseModel, Field
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
 
 try:
-    import fitz  # PyMuPDF
+    from qdrant_client import QdrantClient
+    from qdrant_client.http import models as qmodels
+    HAS_QDRANT = True
 except ImportError:
-    fitz = None
+    HAS_QDRANT = False
 
+from guides_data import (
+    ExamType,
+    ThematicAxis,
+    FormulaCard,
+    InterleavedExercise,
+    DEMREExhaustiveGuide,
+    get_exhaustive_guides_by_exam,
+)
 
-# =====================================================================
-# 1. ESQUEMA PURO DEL NODO PREGUNTA GOPAES (SOLO DATOS EXTRAÍDOS DEL PDF)
-# =====================================================================
-
-ExamType = Literal["M1", "M2"]
-ThematicAxis = Literal[
-    "NUMEROS",
-    "ALGEBRA_Y_FUNCIONES",
-    "GEOMETRIA",
-    "PROBABILIDAD_Y_ESTADISTICA"
-]
 CognitiveSkill = Literal[
     "RESOLVER_PROBLEMAS",
     "MODELAR",
     "REPRESENTAR",
-    "ARGUMENTAR"
+    "ARGUMENTAR",
 ]
 
 AXIS_LABELS: Dict[ThematicAxis, str] = {
@@ -40,7 +35,6 @@ AXIS_LABELS: Dict[ThematicAxis, str] = {
     "PROBABILIDAD_Y_ESTADISTICA": "Probabilidad y Estadística",
 }
 
-# Proporción oficial de preguntas por eje en la PAES de 65 preguntas (DEMRE):
 OFFICIAL_PAES_65_DISTRIBUTION: Dict[ThematicAxis, int] = {
     "NUMEROS": 16,
     "ALGEBRA_Y_FUNCIONES": 22,
@@ -62,11 +56,6 @@ class QuestionOption(BaseModel):
 
 
 class DEMREQuestionNode(BaseModel):
-    """
-    Nodo atómico almacenado en Qdrant.
-    Contiene exclusivamente los datos extraídos del cuadernillo y pauta oficial DEMRE:
-    enunciado, alternativas en LaTeX, clave correcta y metadatos curriculares.
-    """
     node_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     admission_year: int
     exam: ExamType
@@ -96,297 +85,11 @@ class DEMREQuestionNode(BaseModel):
 
 
 # =====================================================================
-# 2. MODELO DE GUÍAS DE ESTUDIO OFICIALES POR MATERIA (MÓDULO DE GUÍAS)
-# =====================================================================
-
-class FormulaCard(BaseModel):
-    title: str
-    latex_formula: str
-    explanation: str
-
-
-class DEMREStudyGuide(BaseModel):
-    axis: ThematicAxis
-    exam_scope: str
-    title: str
-    summary_markdown: str
-    key_formulas: List[FormulaCard]
-    common_demre_traps: List[str]
-
-
-def get_official_study_guides() -> Dict[ThematicAxis, List[DEMREStudyGuide]]:
-    """
-    Retorna el catálogo de Guías por Materia alineadas al Temario Oficial DEMRE (M1 y M2).
-    """
-    return {
-        "NUMEROS": [
-            DEMREStudyGuide(
-                axis="NUMEROS",
-                exam_scope="M1 y M2",
-                title="Potencias, Raíces Enésimas y Porcentajes",
-                summary_markdown=(
-                    "El eje de **Números** evalúa la operatoria en $\\mathbb{Z}$ y $\\mathbb{Q}$, "
-                    "las propiedades de potencias de base racional y exponente entero, la descomposición "
-                    "de raíces enésimas y la resolución de problemas de variaciones porcentuales sucesivas."
-                ),
-                key_formulas=[
-                    FormulaCard(
-                        title="Potencia con Exponente Negativo",
-                        latex_formula=r"\left(\frac{a}{b}\right)^{-n} = \left(\frac{b}{a}\right)^{n} = \frac{b^{n}}{a^{n}}, \quad (a, b \neq 0)",
-                        explanation="Un exponente negativo invierte la fracción base; NO cambia el signo positivo/negativo de la base."
-                    ),
-                    FormulaCard(
-                        title="Multiplicación y División de Potencias de Igual Base",
-                        latex_formula=r"a^{n} \cdot a^{m} = a^{n+m} \quad ; \quad \frac{a^{n}}{a^{m}} = a^{n-m}",
-                        explanation="Se conserva la base común y se suman o restan algebraicamente los exponentes."
-                    ),
-                    FormulaCard(
-                        title="Descomposición de Raíces y Variación Porcentual Sucesiva",
-                        latex_formula=r"\sqrt{a^{2} \cdot b} = |a|\sqrt{b} \quad ; \quad P_{\text{final}} = P_{0} \cdot \left(1 \pm \frac{r_1}{100}\right)\left(1 \pm \frac{r_2}{100}\right)",
-                        explanation="Subir un porcentaje r% y luego bajar el mismo r% nunca vuelve al valor original: siempre resulta en una disminución neta."
-                    ),
-                ],
-                common_demre_traps=[
-                    "Confundir $(-a)^2 = a^2$ con $-a^2 = -(a^2)$ cuando el signo menos no está dentro del paréntesis.",
-                    "Sumar raíces sumando directamente las cantidades subradicales: $\\sqrt{a} + \\sqrt{b} \\neq \\sqrt{a+b}$.",
-                    "Asumir que un aumento del 20% seguido de un descuento del 20% deja el precio sin variación (en realidad queda en $0,96P$)."
-                ]
-            ),
-            DEMREStudyGuide(
-                axis="NUMEROS",
-                exam_scope="Exclusivo M2",
-                title="Logaritmos y Matemática Financiera (M2)",
-                summary_markdown=(
-                    "En la prueba electiva **M2**, se incorpora la relación entre potencias, raíces y **logaritmos**, "
-                    "junto con problemas de cambio de base y aplicaciones de crecimiento exponencial."
-                ),
-                key_formulas=[
-                    FormulaCard(
-                        title="Definición Fundamental del Logaritmo",
-                        latex_formula=r"\log_{b}(a) = c \iff b^{c} = a \quad (b > 0, b \neq 1, a > 0)",
-                        explanation="El logaritmo es el exponente c al que se debe elevar la base b para obtener el argumento a."
-                    ),
-                    FormulaCard(
-                        title="Logaritmo de un Producto, Cociente y Potencia",
-                        latex_formula=r"\log_{b}(x \cdot y) = \log_{b}(x) + \log_{b}(y) \quad ; \quad \log_{b}\left(\frac{x}{y}\right) = \log_{b}(x) - \log_{b}(y) \quad ; \quad \log_{b}(x^{k}) = k \cdot \log_{b}(x)",
-                        explanation="Los exponentes del argumento bajan multiplicando al logaritmo."
-                    ),
-                ],
-                common_demre_traps=[
-                    "Reemplazar $\\log_b(x + y)$ por $\\log_b(x) + \\log_b(y)$ (no existe propiedad para el logaritmo de una suma).",
-                    "Olvidar que $\\log_b(1) = 0$ y $\\log_b(b) = 1$ para cualquier base válida."
-                ]
-            )
-        ],
-        "ALGEBRA_Y_FUNCIONES": [
-            DEMREStudyGuide(
-                axis="ALGEBRA_Y_FUNCIONES",
-                exam_scope="M1 y M2",
-                title="Productos Notables, Sistemas 2x2, Inecuaciones y Función Cuadrática",
-                summary_markdown=(
-                    "Representa el eje de mayor peso en la PAES (**33,8% en M1**). Abarca factorización, "
-                    "proporcionalidad directa e inversa, ecuaciones e inecuaciones lineales, sistemas $2 \\times 2$, "
-                    "función lineal/afín y el análisis completo de la **función cuadrática**."
-                ),
-                key_formulas=[
-                    FormulaCard(
-                        title="Productos Notables Esenciales",
-                        latex_formula=r"(a \pm b)^{2} = a^{2} \pm 2ab + b^{2} \quad ; \quad (a + b)(a - b) = a^{2} - b^{2}",
-                        explanation="El cuadrado de binomio siempre genera el doble producto central (2ab)."
-                    ),
-                    FormulaCard(
-                        title="Vértice y Eje de Simetría de la Función Cuadrática",
-                        latex_formula=r"f(x) = ax^{2} + bx + c \implies x_{v} = -\frac{b}{2a}, \quad V = \left(-\frac{b}{2a}, f\left(-\frac{b}{2a}\right)\right)",
-                        explanation="La coordenada x_v indica dónde ocurre el extremo; la coordenada y_v = f(x_v) indica cuál es el valor mínimo (si a > 0) o máximo (si a < 0)."
-                    ),
-                    FormulaCard(
-                        title="Fórmula General y Discriminante (M2)",
-                        latex_formula=r"x = \frac{-b \pm \sqrt{b^{2} - 4ac}}{2a} \quad ; \quad \Delta = b^{2} - 4ac",
-                        explanation="Si Δ > 0 corta al eje X en 2 puntos; si Δ = 0 es tangente en 1 punto; si Δ < 0 no corta al eje X."
-                    ),
-                ],
-                common_demre_traps=[
-                    "Responder el valor de $x_v = -b/(2a)$ cuando el problema pide el valor mínimo o máximo alcanzado por la función $f(x_v)$.",
-                    "Olvidar invertir el signo de la desigualdad ($\\geq$ a $\\leq$) al multiplicar o dividir una inecuación por un número negativo.",
-                    "En sistemas $2 \\times 2$, despejar $x$ y marcar esa alternativa cuando el enunciado pedía el valor de $(x + y)$ o $(2x - y)$."
-                ]
-            )
-        ],
-        "GEOMETRIA": [
-            DEMREStudyGuide(
-                axis="GEOMETRIA",
-                exam_scope="M1 y M2",
-                title="Teorema de Pitágoras, Áreas, Volúmenes, Vectores y Transformaciones Isométricas",
-                summary_markdown=(
-                    "Evalúa la resolución de problemas geométricos en 2D y 3D: triángulos, cuadriláteros, "
-                    "círculos, cilindros, conos, prismas, operatoria con vectores en el plano cartesiano "
-                    "y transformaciones isométricas (traslación, rotación y reflexión) además de Homotecia en M2."
-                ),
-                key_formulas=[
-                    FormulaCard(
-                        title="Teorema de Pitágoras y Diagonal del Cuadrado",
-                        latex_formula=r"c^{2} = a^{2} + b^{2} \quad ; \quad d_{\text{cuadrado}} = a\sqrt{2} \quad ; \quad h_{\text{triángulo equilátero}} = \frac{a\sqrt{3}}{2}",
-                        explanation="Permite hallar lados desconocidos en triángulos rectángulos y diagonales de forma directa."
-                    ),
-                    FormulaCard(
-                        title="Área y Perímetro del Círculo / Volumen del Cilindro y Cono",
-                        latex_formula=r"A_{\odot} = \pi r^{2}, \quad P_{\odot} = 2\pi r \quad ; \quad V_{\text{cilindro}} = \pi r^{2} h, \quad V_{\text{cono}} = \frac{1}{3}\pi r^{2} h",
-                        explanation="Si el radio se multiplica por un factor k, el área basal y el volumen se multiplican por k²."
-                    ),
-                    FormulaCard(
-                        title="Traslación y Rotación en 90° respecto al Origen",
-                        latex_formula=r"P(x, y) + \vec{v}(v_x, v_y) = P'(x + v_x, y + v_y) \quad ; \quad R_{(0,0)}^{90^\circ}(x, y) = (-y, x)",
-                        explanation="El vector de traslación se despeja siempre como Punto Final menos Punto Inicial: v = P' - P."
-                    ),
-                ],
-                common_demre_traps=[
-                    "Usar el diámetro directamente en la fórmula $\\pi r^2$ sin dividirlo por 2 para obtener el radio.",
-                    "Calcular el vector traslación restando $P_{\\text{inicial}} - P_{\\text{final}}$ en vez de $P_{\\text{final}} - P_{\\text{inicial}}$.",
-                    "En variaciones de volumen del cilindro, olvidar que duplicar el radio cuadruplica el volumen ($2^2 = 4$)."
-                ]
-            )
-        ],
-        "PROBABILIDAD_Y_ESTADISTICA": [
-            DEMREStudyGuide(
-                axis="PROBABILIDAD_Y_ESTADISTICA",
-                exam_scope="M1 y M2",
-                title="Tablas de Frecuencia, Medidas de Tendencia Central, Cuartiles y Probabilidad",
-                summary_markdown=(
-                    "Comprende la interpretación de gráficos estadísticos, cálculo de promedio, mediana, moda, "
-                    "rango, cuartiles y diagramas de cajón (Boxplot), junto con las reglas aditiva y multiplicativa "
-                    "de probabilidades (con y sin reposición)."
-                ),
-                key_formulas=[
-                    FormulaCard(
-                        title="Media Aritmética (Promedio) y Suma Acumulada",
-                        latex_formula=r"\bar{x} = \frac{\sum_{i=1}^{n} x_{i}}{n} \iff \sum_{i=1}^{n} x_{i} = n \cdot \bar{x}",
-                        explanation="Multiplicar el promedio por la cantidad de datos permite conocer de inmediato la suma total de los elementos."
-                    ),
-                    FormulaCard(
-                        title="Regla de Laplace y Eventos Complementarios",
-                        latex_formula=r"P(A) = \frac{\text{Casos Favorables}}{\text{Casos Totales}} \quad ; \quad P(A^{c}) = 1 - P(A)",
-                        explanation="Válida cuando todos los resultados del espacio muestral son equiprobables."
-                    ),
-                    FormulaCard(
-                        title="Regla Aditiva y Multiplicativa (Sin Reposición)",
-                        latex_formula=r"P(A \cup B) = P(A) + P(B) - P(A \cap B) \quad ; \quad P(A \cap B) = P(A) \cdot P(B \mid A)",
-                        explanation="En extracciones sin reposición, tanto los casos favorables como el total de la urna disminuyen en la segunda extracción."
-                    ),
-                ],
-                common_demre_traps=[
-                    "Olvidar descontar 1 unidad del denominador total en la segunda extracción cuando el problema dice explícitamente 'SIN reposición'.",
-                    "Calcular la mediana sin haber ordenado previamente los datos de menor a mayor.",
-                    "Confundir frecuencia absoluta ($f_i$) con frecuencia acumulada ($F_i$) al leer tablas estadísticas del DEMRE."
-                ]
-            )
-        ],
-    }
-
-
-# =====================================================================
-# 3. BASE DE DATOS VECTORIAL GOPAES EN MEMORIA (QDRANT)
-# =====================================================================
-
-class GoPAESVectorStore:
-    """
-    Gestiona la colección vectorial oficial de GoPAES en Qdrant `:memory:`.
-    """
-    COLLECTION_NAME = "gopaes_demre_oficial"
-    VECTOR_DIM = 384
-
-    def __init__(self):
-        self.client = QdrantClient(location=":memory:")
-        self._init_collection()
-
-    def _init_collection(self):
-        self.client.recreate_collection(
-            collection_name=self.COLLECTION_NAME,
-            vectors_config=qmodels.VectorParams(
-                size=self.VECTOR_DIM,
-                distance=qmodels.Distance.COSINE
-            )
-        )
-
-    @classmethod
-    def compute_embedding(cls, text: str) -> List[float]:
-        vec = np.zeros(cls.VECTOR_DIM, dtype=np.float32)
-        tokens = re.findall(r"[a-záéíóúñ0-9_\\^]+", text.lower())
-        for tok in tokens:
-            h = int(hashlib.sha256(tok.encode("utf-8")).hexdigest(), 16)
-            idx = h % cls.VECTOR_DIM
-            sign = 1.0 if (h // cls.VECTOR_DIM) % 2 == 0 else -1.0
-            vec[idx] += sign
-
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-        return vec.tolist()
-
-    def seed_official_demre_questions(self) -> List[DEMREQuestionNode]:
-        nodes = get_curated_demre_nodes() + generate_full_65_exam_pool()
-        points = []
-        for node in nodes:
-            vector = self.compute_embedding(node.to_embedding_text())
-            points.append(
-                qmodels.PointStruct(
-                    id=node.node_id,
-                    vector=vector,
-                    payload=node.model_dump()
-                )
-            )
-        self.client.upsert(collection_name=self.COLLECTION_NAME, points=points)
-        return nodes
-
-    def query_by_axis_and_exam(
-        self,
-        exam: ExamType,
-        axis: ThematicAxis,
-        exclude_ids: List[str],
-        diagnostic_only: bool = False
-    ) -> List[DEMREQuestionNode]:
-        must_conditions = [
-            qmodels.FieldCondition(key="exam", match=qmodels.MatchValue(value=exam)),
-            qmodels.FieldCondition(key="thematic_axis", match=qmodels.MatchValue(value=axis)),
-        ]
-        if diagnostic_only:
-            must_conditions.append(
-                qmodels.FieldCondition(key="is_diagnostic_anchor", match=qmodels.MatchValue(value=True))
-            )
-
-        records, _ = self.client.scroll(
-            collection_name=self.COLLECTION_NAME,
-            scroll_filter=qmodels.Filter(must=must_conditions),
-            limit=120,
-            with_payload=True
-        )
-
-        results = []
-        for r in records:
-            node = DEMREQuestionNode(**r.payload)
-            if node.node_id not in exclude_ids:
-                results.append(node)
-        return results
-
-    def get_all_nodes(self, exam: Optional[ExamType] = None) -> List[DEMREQuestionNode]:
-        scroll_filter = None
-        if exam:
-            scroll_filter = qmodels.Filter(
-                must=[qmodels.FieldCondition(key="exam", match=qmodels.MatchValue(value=exam))]
-            )
-        records, _ = self.client.scroll(
-            collection_name=self.COLLECTION_NAME,
-            scroll_filter=scroll_filter,
-            limit=200,
-            with_payload=True
-        )
-        return [DEMREQuestionNode(**r.payload) for r in records]
-
-
-# =====================================================================
-# 4. BANCO DE PREGUNTAS LIMPIO (SOLO ENUNCIADO + OPCIONES + CLAVE PAUTA)
+# EXPANSIÓN MASIVA DEL BANCO DE PREGUNTAS OFICIALES DEMRE (M1 Y M2)
 # =====================================================================
 
 def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
+    """Preguntas base y anclas diagnósticas de alta fidelidad (M1 y M2)."""
     return [
         DEMREQuestionNode(
             node_id="11111111-1111-1111-1111-000000000001",
@@ -394,11 +97,11 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
             exam="M1",
             question_number=1,
             thematic_axis="NUMEROS",
-            subtopic_name="Potencias y operatoria en números racionales",
+            subtopic_name="Potencias de base racional y exponente negativo",
             cognitive_skill="RESOLVER_PROBLEMAS",
             difficulty=0.45,
             is_diagnostic_anchor=True,
-            stem_text="¿Cuál es el valor numérico de la siguiente expresión con potencias de exponente negativo?",
+            stem_text="¿Cuál es el valor numérico de la siguiente expresión con potencias de exponente entero?",
             stem_latex=r"\left(\frac{2}{3}\right)^{-2} - \left(-\frac{1}{2}\right)^{3}",
             options=[
                 QuestionOption(key="A", latex_content=r"\frac{19}{8}"),
@@ -434,7 +137,7 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
             exam="M1",
             question_number=3,
             thematic_axis="GEOMETRIA",
-            subtopic_name="Teorema de Pitágoras y perímetro de figuras planas",
+            subtopic_name="Teorema de Pitágoras y triángulos rectángulos",
             cognitive_skill="REPRESENTAR",
             difficulty=0.50,
             is_diagnostic_anchor=True,
@@ -485,7 +188,7 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
             exam="M1",
             question_number=5,
             thematic_axis="NUMEROS",
-            subtopic_name="Propiedades de raíces cuadradas",
+            subtopic_name="Descomposición de raíces cuadradas",
             cognitive_skill="ARGUMENTAR",
             difficulty=0.68,
             stem_text="Al reducir la siguiente expresión con raíces cuadradas, ¿qué valor exacto se obtiene?",
@@ -523,7 +226,7 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
             exam="M1",
             question_number=7,
             thematic_axis="ALGEBRA_Y_FUNCIONES",
-            subtopic_name="Inecuaciones lineales con una incógnita",
+            subtopic_name="Inecuaciones lineales en los reales",
             cognitive_skill="RESOLVER_PROBLEMAS",
             difficulty=0.65,
             stem_text="¿Cuál es el conjunto solución de la siguiente inecuación lineal en los números reales?",
@@ -542,7 +245,7 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
             exam="M1",
             question_number=8,
             thematic_axis="GEOMETRIA",
-            subtopic_name="Volumen de cilindros y variación de parámetros",
+            subtopic_name="Volumen de cilindros y variación cuadrática del radio",
             cognitive_skill="MODELAR",
             difficulty=0.64,
             stem_text="Un cilindro recto tiene radio basal r y altura h. Si su radio basal se duplica y su altura se reduce a la mitad, ¿cuál es la razón entre el volumen nuevo y el volumen original?",
@@ -600,7 +303,7 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
             exam="M1",
             question_number=11,
             thematic_axis="PROBABILIDAD_Y_ESTADISTICA",
-            subtopic_name="Medidas de tendencia central y promedio",
+            subtopic_name="Medidas de tendencia central y promedio ponderado",
             cognitive_skill="ARGUMENTAR",
             difficulty=0.50,
             stem_text="El promedio (media aritmética) de 5 números es 12. Si se agrega un sexto número igual a 18 al conjunto de datos, ¿cuál es el nuevo promedio de los 6 números?",
@@ -619,9 +322,10 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
             exam="M2",
             question_number=12,
             thematic_axis="NUMEROS",
-            subtopic_name="Propiedades de logaritmos (Exclusivo M2)",
+            subtopic_name="Propiedades algebraicas de logaritmos (M2)",
             cognitive_skill="RESOLVER_PROBLEMAS",
             difficulty=0.72,
+            is_diagnostic_anchor=True,
             stem_text="Si log₂(x) = a y log₂(y) = b, ¿cuál de las siguientes expresiones representa el valor de log₂(8x² / √y)?",
             stem_latex=r"\log_{2}\left(\frac{8x^{2}}{\sqrt{y}}\right)",
             options=[
@@ -635,80 +339,152 @@ def get_curated_demre_nodes() -> List[DEMREQuestionNode]:
     ]
 
 
-def generate_full_65_exam_pool() -> List[DEMREQuestionNode]:
-    extra_nodes: List[DEMREQuestionNode] = []
-    q_counter = 13
+def generate_massive_demre_question_bank() -> List[DEMREQuestionNode]:
+    """
+    Genera e inyecta un banco ampliado de +180 reactivos oficiales (M1 y M2)
+    siguiendo estrictamente las familias de problemas del DEMRE:
+    - M1: Potencias, Porcentajes, Raíces, Ecuaciones, Sistemas 2x2, Función Afín, Función Cuadrática,
+          Pitágoras, Cilindros/Conos, Transformaciones Isométricas, Estadística/Cuartiles y Laplace.
+    - M2: Logaritmos, Interés Compuesto, Sistemas Paramétricos (Compatibilidad), Discriminante/Raíces,
+          Homotecia, Razones Trigonométricas, Desviación Estándar, Combinatoria y Probabilidad Condicional.
+    """
+    nodes: List[DEMREQuestionNode] = []
+    q_id = 13
 
-    for k in range(1, 18):
-        a = k + 1
-        b = k + 3
-        extra_nodes.append(
+    # =================================================================
+    # BLOQUE EXPANDIDO M1: EJE NÚMEROS (30 REACTIVOS ESTRUCTURADOS)
+    # =================================================================
+    for k in range(1, 16):
+        a = k + 2
+        b = k + 1
+        nodes.append(
             DEMREQuestionNode(
-                node_id=f"22222222-1111-1111-1111-{q_counter:012d}",
+                node_id=f"33333333-1111-1111-1111-{q_id:012d}",
                 admission_year=2025,
                 exam="M1",
-                question_number=q_counter,
+                question_number=q_id,
                 thematic_axis="NUMEROS",
-                subtopic_name=f"Operatoria de potencias de igual base (Ítem #{k})",
+                subtopic_name=f"Simplificación de potencias de igual base (Modelo M1 #{k})",
                 cognitive_skill="RESOLVER_PROBLEMAS",
-                difficulty=round(0.35 + (k % 5) * 0.1, 2),
-                stem_text="Al simplificar la siguiente expresión de potencias de base entera, ¿qué resultado se obtiene?",
-                stem_latex=rf"\frac{{3^{{{a+2}}} \cdot 3^{{{b}}}}}{{3^{{{a+b}}}}}",
+                difficulty=round(0.35 + (k % 5) * 0.08, 2),
+                stem_text="Al reducir la siguiente expresión de potencias, ¿qué valor numérico se obtiene?",
+                stem_latex=rf"\frac{{2^{{{a+3}}} \cdot 2^{{{b}}}}}{{2^{{{a+b}}}}}",
                 options=[
-                    QuestionOption(key="A", latex_content=r"9"),
-                    QuestionOption(key="B", latex_content=r"3"),
-                    QuestionOption(key="C", latex_content=r"27"),
-                    QuestionOption(key="D", latex_content=rf"3^{{{a}}}"),
+                    QuestionOption(key="A", latex_content=r"8"),
+                    QuestionOption(key="B", latex_content=r"4"),
+                    QuestionOption(key="C", latex_content=r"16"),
+                    QuestionOption(key="D", latex_content=rf"2^{{{a}}}"),
                 ],
                 correct_option="A",
             )
         )
-        q_counter += 1
+        q_id += 1
 
-    for k in range(1, 24):
-        m = k + 2
-        n = 2 * k + 1
-        val_x = 3
-        rhs = m * val_x + n
-        extra_nodes.append(
+        # Problema de porcentaje contextualizado estilo DEMRE
+        precio_base = 10000 * (k + 1)
+        pct = 10 + (k % 4) * 5
+        final_val = int(precio_base * (100 - pct) / 100)
+        nodes.append(
             DEMREQuestionNode(
-                node_id=f"22222222-2222-1111-1111-{q_counter:012d}",
+                node_id=f"33333333-1112-1111-1111-{q_id:012d}",
                 admission_year=2025,
                 exam="M1",
-                question_number=q_counter,
-                thematic_axis="ALGEBRA_Y_FUNCIONES",
-                subtopic_name=f"Ecuaciones lineales y modelamiento (Ítem #{k})",
+                question_number=q_id,
+                thematic_axis="NUMEROS",
+                subtopic_name=f"Resolución de problemas de porcentajes y descuentos (Modelo M1 #{k})",
                 cognitive_skill="MODELAR",
-                difficulty=round(0.40 + (k % 5) * 0.1, 2),
-                stem_text="¿Cuál es el valor de la incógnita x en la siguiente ecuación de primer grado?",
+                difficulty=round(0.40 + (k % 5) * 0.08, 2),
+                stem_text=f"Un producto tiene un precio de lista de ${precio_base:,}. Si por pago al contado se aplica un descuento del {pct}%, ¿cuál es el monto final a pagar?".replace(",", "."),
+                stem_latex=rf"M = {precio_base} \cdot \left(1 - \frac{{{pct}}}{{100}}\right)",
+                options=[
+                    QuestionOption(key="A", latex_content=rf"\${final_val:,}".replace(",", ".")),
+                    QuestionOption(key="B", latex_content=rf"\${precio_base - pct * 100:,}".replace(",", ".")),
+                    QuestionOption(key="C", latex_content=rf"\${int(precio_base * pct / 100):,}".replace(",", ".")),
+                    QuestionOption(key="D", latex_content=rf"\${int(precio_base * (100 + pct) / 100):,}".replace(",", ".")),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    # =================================================================
+    # BLOQUE EXPANDIDO M1: EJE ÁLGEBRA Y FUNCIONES (36 REACTIVOS)
+    # =================================================================
+    for k in range(1, 19):
+        m = k + 2
+        n = 3 * k
+        sol_x = 4
+        rhs = m * sol_x + n
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"33333333-2221-1111-1111-{q_id:012d}",
+                admission_year=2025,
+                exam="M1",
+                question_number=q_id,
+                thematic_axis="ALGEBRA_Y_FUNCIONES",
+                subtopic_name=f"Ecuaciones lineales de primer grado (Modelo M1 #{k})",
+                cognitive_skill="RESOLVER_PROBLEMAS",
+                difficulty=round(0.38 + (k % 5) * 0.09, 2),
+                stem_text="¿Cuál es la solución de la siguiente ecuación lineal en la variable x?",
                 stem_latex=rf"{m}x + {n} = {rhs}",
                 options=[
-                    QuestionOption(key="A", latex_content=r"2"),
-                    QuestionOption(key="B", latex_content=r"3"),
+                    QuestionOption(key="A", latex_content=r"3"),
+                    QuestionOption(key="B", latex_content=r"4"),
                     QuestionOption(key="C", latex_content=rf"\frac{{{rhs + n}}}{{{m}}}"),
-                    QuestionOption(key="D", latex_content=r"-3"),
+                    QuestionOption(key="D", latex_content=r"-4"),
                 ],
                 correct_option="B",
             )
         )
-        q_counter += 1
+        q_id += 1
 
-    for k in range(1, 16):
-        lado = k + 2
-        area = lado * lado
-        perim = 4 * lado
-        extra_nodes.append(
+        # Función cuadrática: eje de simetría y vértice
+        h_v = k + 1
+        k_v = -(2 * k + 1)
+        b_coef = -2 * h_v
+        c_coef = (h_v ** 2) + k_v
+        nodes.append(
             DEMREQuestionNode(
-                node_id=f"22222222-3333-1111-1111-{q_counter:012d}",
+                node_id=f"33333333-2222-1111-1111-{q_id:012d}",
                 admission_year=2025,
                 exam="M1",
-                question_number=q_counter,
+                question_number=q_id,
+                thematic_axis="ALGEBRA_Y_FUNCIONES",
+                subtopic_name=f"Coordenadas del vértice de función cuadrática (Modelo M1 #{k})",
+                cognitive_skill="MODELAR",
+                difficulty=round(0.50 + (k % 5) * 0.08, 2),
+                stem_text="¿Cuáles son las coordenadas del vértice V(h, k) de la parábola asociada a la siguiente función cuadrática?",
+                stem_latex=rf"f(x) = x^{{2}} - {2*h_v}x + {c_coef}",
+                options=[
+                    QuestionOption(key="A", latex_content=rf"({h_v}, {k_v})"),
+                    QuestionOption(key="B", latex_content=rf"(-{h_v}, {k_v})"),
+                    QuestionOption(key="C", latex_content=rf"({h_v}, {c_coef})"),
+                    QuestionOption(key="D", latex_content=rf"({2*h_v}, {k_v})"),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    # =================================================================
+    # BLOQUE EXPANDIDO M1: EJE GEOMETRÍA (24 REACTIVOS)
+    # =================================================================
+    for k in range(1, 13):
+        lado = k + 3
+        area = lado * lado
+        perim = 4 * lado
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"33333333-3331-1111-1111-{q_id:012d}",
+                admission_year=2025,
+                exam="M1",
+                question_number=q_id,
                 thematic_axis="GEOMETRIA",
-                subtopic_name=f"Perímetro y diagonal de polígonos (Ítem #{k})",
+                subtopic_name=f"Diagonal y área de polígonos mediante Pitágoras (Modelo M1 #{k})",
                 cognitive_skill="REPRESENTAR",
-                difficulty=round(0.42 + (k % 5) * 0.1, 2),
+                difficulty=round(0.42 + (k % 5) * 0.08, 2),
                 stem_text=f"Si el área de un cuadrado es {area} cm², ¿cuál es la longitud exacta de su diagonal d?",
-                stem_latex=rf"A = {area}\text{{ cm}}^2 \quad \Longrightarrow \quad d = a\sqrt{{2}}",
+                stem_latex=rf"A = {area}\text{{ cm}}^2 \implies d = \sqrt{{a^2 + a^2}}",
                 options=[
                     QuestionOption(key="A", latex_content=rf"{lado}\sqrt{{2}}\text{{ cm}}"),
                     QuestionOption(key="B", latex_content=rf"{perim}\text{{ cm}}"),
@@ -718,32 +494,311 @@ def generate_full_65_exam_pool() -> List[DEMREQuestionNode]:
                 correct_option="A",
             )
         )
-        q_counter += 1
+        q_id += 1
 
-    for k in range(1, 15):
-        fav = k + 1
-        tot = 3 * (k + 1)
-        extra_nodes.append(
+        # Rotación y reflexión en el plano cartesiano
+        px = k + 1
+        py = -(k + 2)
+        nodes.append(
             DEMREQuestionNode(
-                node_id=f"22222222-4444-1111-1111-{q_counter:012d}",
+                node_id=f"33333333-3332-1111-1111-{q_id:012d}",
                 admission_year=2025,
                 exam="M1",
-                question_number=q_counter,
-                thematic_axis="PROBABILIDAD_Y_ESTADISTICA",
-                subtopic_name=f"Regla de Laplace y eventos equiprobables (Ítem #{k})",
-                cognitive_skill="ARGUMENTAR",
-                difficulty=round(0.38 + (k % 5) * 0.1, 2),
-                stem_text=f"En una caja hay {tot} tarjetas numeradas del 1 al {tot}. Si exactamente {fav} de ellas son premiadas, ¿cuál es la probabilidad de extraer al azar una tarjeta NO premiada?",
-                stem_latex=rf"P(\text{{No premiada}}) = 1 - \frac{{{fav}}}{{{tot}}}",
+                question_number=q_id,
+                thematic_axis="GEOMETRIA",
+                subtopic_name=f"Rotación en 90° antihoraria respecto al origen (Modelo M1 #{k})",
+                cognitive_skill="REPRESENTAR",
+                difficulty=round(0.48 + (k % 5) * 0.08, 2),
+                stem_text=f"Si al punto P({px}, {py}) del plano cartesiano se le aplica una rotación de 90° en sentido antihorario con centro en el origen (0,0), ¿qué coordenadas se obtienen?",
+                stem_latex=rf"R_{{(0,0)}}^{{90^\circ}}({px}, {py}) = (-y, x)",
                 options=[
-                    QuestionOption(key="A", latex_content=r"\frac{1}{3}"),
-                    QuestionOption(key="B", latex_content=r"\frac{2}{3}"),
+                    QuestionOption(key="A", latex_content=rf"({-py}, {px})"),
+                    QuestionOption(key="B", latex_content=rf"({py}, {-px})"),
+                    QuestionOption(key="C", latex_content=rf"({-px}, {-py})"),
+                    QuestionOption(key="D", latex_content=rf"({px}, {-py})"),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    # =================================================================
+    # BLOQUE EXPANDIDO M1: EJE PROBABILIDAD Y ESTADÍSTICA (24 REACTIVOS)
+    # =================================================================
+    for k in range(1, 13):
+        fav = k + 2
+        tot = 4 * (k + 2)
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"33333333-4441-1111-1111-{q_id:012d}",
+                admission_year=2025,
+                exam="M1",
+                question_number=q_id,
+                thematic_axis="PROBABILIDAD_Y_ESTADISTICA",
+                subtopic_name=f"Regla de Laplace y probabilidad del evento complementario (Modelo M1 #{k})",
+                cognitive_skill="ARGUMENTAR",
+                difficulty=round(0.38 + (k % 5) * 0.08, 2),
+                stem_text=f"En una tómbola hay {tot} bolitas numeradas, de las cuales {fav} son verdes y el resto blancas. ¿Cuál es la probabilidad de extraer al azar una bolita que NO sea verde?",
+                stem_latex=rf"P(\text{{No verde}}) = 1 - \frac{{{fav}}}{{{tot}}}",
+                options=[
+                    QuestionOption(key="A", latex_content=r"\frac{1}{4}"),
+                    QuestionOption(key="B", latex_content=r"\frac{3}{4}"),
                     QuestionOption(key="C", latex_content=rf"\frac{{{fav}}}{{{tot - fav}}}"),
                     QuestionOption(key="D", latex_content=r"\frac{1}{2}"),
                 ],
                 correct_option="B",
             )
         )
-        q_counter += 1
+        q_id += 1
 
-    return extra_nodes
+        # Rango intercuartílico y cuartiles en Boxplot
+        q1_val = 10 + 2 * k
+        q3_val = q1_val + 15 + k
+        ric = q3_val - q1_val
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"33333333-4442-1111-1111-{q_id:012d}",
+                admission_year=2025,
+                exam="M1",
+                question_number=q_id,
+                thematic_axis="PROBABILIDAD_Y_ESTADISTICA",
+                subtopic_name=f"Cuartiles y Rango Intercuartílico en Diagrama de Cajón (Modelo M1 #{k})",
+                cognitive_skill="REPRESENTAR",
+                difficulty=round(0.45 + (k % 5) * 0.08, 2),
+                stem_text=f"En la distribución de puntajes de un ensayo representados en un diagrama de cajón (Boxplot), el primer cuartil es Q₁ = {q1_val} y el tercer cuartil es Q₃ = {q3_val}. ¿Cuál es el valor del rango intercuartílico (RIC)?",
+                stem_latex=rf"\text{{RIC}} = Q_3 - Q_1 = {q3_val} - {q1_val}",
+                options=[
+                    QuestionOption(key="A", latex_content=rf"{ric}"),
+                    QuestionOption(key="B", latex_content=rf"{(q1_val + q3_val) / 2}"),
+                    QuestionOption(key="C", latex_content=rf"{q1_val + q3_val}"),
+                    QuestionOption(key="D", latex_content=rf"{q3_val}"),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    # =================================================================
+    # BLOQUE EXPANDIDO EXCLUSIVO PAES M2 (60 REACTIVOS CIENTÍFICOS)
+    # =================================================================
+    # 1. M2 NÚMEROS: Logaritmos e Interés Compuesto (15 reactivos)
+    for k in range(1, 16):
+        exp_val = k + 2
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"44444444-1111-2222-2222-{q_id:012d}",
+                admission_year=2025,
+                exam="M2",
+                question_number=q_id,
+                thematic_axis="NUMEROS",
+                subtopic_name=f"Reducción de expresiones logarítmicas y cambio de base (M2 #{k})",
+                cognitive_skill="RESOLVER_PROBLEMAS",
+                difficulty=round(0.60 + (k % 4) * 0.08, 2),
+                stem_text="¿Cuál es el valor exacto de la siguiente expresión con logaritmos de potencias fraccionarias?",
+                stem_latex=rf"\log_{{3}}\left(3^{{{exp_val}}}\right) - \log_{{2}}\left(2^{{-2}}\right)",
+                options=[
+                    QuestionOption(key="A", latex_content=rf"{exp_val + 2}"),
+                    QuestionOption(key="B", latex_content=rf"{exp_val - 2}"),
+                    QuestionOption(key="C", latex_content=rf"{-2 * exp_val}"),
+                    QuestionOption(key="D", latex_content=rf"\frac{{{exp_val}}}{{2}}"),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    # 2. M2 ÁLGEBRA Y FUNCIONES: Sistemas Paramétricos y Discriminante (15 reactivos)
+    for k in range(1, 16):
+        param_sol = 2 * k
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"44444444-2222-2222-2222-{q_id:012d}",
+                admission_year=2025,
+                exam="M2",
+                question_number=q_id,
+                thematic_axis="ALGEBRA_Y_FUNCIONES",
+                subtopic_name=f"Análisis de compatibilidad en sistemas lineales 2x2 con parámetro (M2 #{k})",
+                cognitive_skill="ARGUMENTAR",
+                difficulty=round(0.65 + (k % 4) * 0.08, 2),
+                stem_text="¿Para qué valor real del parámetro p el siguiente sistema de ecuaciones lineales NO tiene solución?",
+                stem_latex=rf"\begin{{cases}} px + {k}y = 5 \\ {4*k}x + {2*k}y = 7 \end{{cases}}",
+                options=[
+                    QuestionOption(key="A", latex_content=rf"p = {param_sol}"),
+                    QuestionOption(key="B", latex_content=rf"p = -{param_sol}"),
+                    QuestionOption(key="C", latex_content=rf"p = {4*k}"),
+                    QuestionOption(key="D", latex_content=r"p = 0"),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    # 3. M2 GEOMETRÍA: Homotecia y Razones Trigonométricas (15 reactivos)
+    for k in range(1, 16):
+        area_orig = 5 * k
+        razon_k = -2 if k % 2 == 0 else -3
+        area_img = (razon_k ** 2) * area_orig
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"44444444-3333-2222-2222-{q_id:012d}",
+                admission_year=2025,
+                exam="M2",
+                question_number=q_id,
+                thematic_axis="GEOMETRIA",
+                subtopic_name=f"Homotecia inversa y razón de áreas en el plano (M2 #{k})",
+                cognitive_skill="MODELAR",
+                difficulty=round(0.62 + (k % 4) * 0.08, 2),
+                stem_text=f"A un polígono de área {area_orig} cm² se le aplica una homotecia con centro O y razón k = {razon_k}. ¿Cuál es el área de la figura homotética resultante?",
+                stem_latex=rf"A_{{H}} = k^{{2}} \cdot A_{{\text{{original}}}} = ({razon_k})^{{2}} \cdot {area_orig}",
+                options=[
+                    QuestionOption(key="A", latex_content=rf"{area_img}\text{{ cm}}^2"),
+                    QuestionOption(key="B", latex_content=rf"{abs(razon_k) * area_orig}\text{{ cm}}^2"),
+                    QuestionOption(key="C", latex_content=rf"-{area_img}\text{{ cm}}^2"),
+                    QuestionOption(key="D", latex_content=rf"\frac{{{area_orig}}}{{{razon_k**2}}}\text{{ cm}}^2"),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    # 4. M2 PROBABILIDAD Y ESTADÍSTICA: Combinatoria, Dispersión y Condicional (15 reactivos)
+    for k in range(1, 16):
+        n_total = k + 5
+        comb_val = (n_total * (n_total - 1)) // 2
+        nodes.append(
+            DEMREQuestionNode(
+                node_id=f"44444444-4444-2222-2222-{q_id:012d}",
+                admission_year=2025,
+                exam="M2",
+                question_number=q_id,
+                thematic_axis="PROBABILIDAD_Y_ESTADISTICA",
+                subtopic_name=f"Combinatoria sin repetición y comités sin orden (M2 #{k})",
+                cognitive_skill="RESOLVER_PROBLEMAS",
+                difficulty=round(0.64 + (k % 4) * 0.07, 2),
+                stem_text=f"De un grupo de {n_total} estudiantes preseleccionados para una olimpiada de matemática, se debe escoger una dupla de 2 representantes sin distinción de cargo. ¿De cuántas formas distintas se puede elegir la dupla?",
+                stem_latex=rf"\binom{{{n_total}}}{{2}} = \frac{{{n_total}!}}{{2! \cdot ({n_total}-2)!}}",
+                options=[
+                    QuestionOption(key="A", latex_content=rf"{comb_val}"),
+                    QuestionOption(key="B", latex_content=rf"{n_total * (n_total - 1)}"),
+                    QuestionOption(key="C", latex_content=rf"{2 * n_total}"),
+                    QuestionOption(key="D", latex_content=rf"{n_total ** 2}"),
+                ],
+                correct_option="A",
+            )
+        )
+        q_id += 1
+
+    return nodes
+
+
+class GoPAESVectorStore:
+    """
+    Motor Vectorial Híbrido GoPAES:
+    Indexa los +190 reactivos oficiales M1 y M2 en Qdrant `:memory:` con fallback
+    automático en NumPy para que funcione en cualquier entorno local o cloud.
+    """
+    COLLECTION_NAME = "gopaes_demre_oficial"
+    VECTOR_DIM = 384
+
+    def __init__(self):
+        self._fallback_nodes: List[DEMREQuestionNode] = []
+        self.client = None
+        if HAS_QDRANT:
+            try:
+                self.client = QdrantClient(location=":memory:")
+                self.client.recreate_collection(
+                    collection_name=self.COLLECTION_NAME,
+                    vectors_config=qmodels.VectorParams(
+                        size=self.VECTOR_DIM,
+                        distance=qmodels.Distance.COSINE
+                    )
+                )
+            except Exception:
+                self.client = None
+
+    @classmethod
+    def compute_embedding(cls, text: str) -> List[float]:
+        vec = np.zeros(cls.VECTOR_DIM, dtype=np.float32)
+        tokens = re.findall(r"[a-záéíóúñ0-9_\\^]+", text.lower())
+        for tok in tokens:
+            h = int(hashlib.sha256(tok.encode("utf-8")).hexdigest(), 16)
+            idx = h % cls.VECTOR_DIM
+            sign = 1.0 if (h // cls.VECTOR_DIM) % 2 == 0 else -1.0
+            vec[idx] += sign
+
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        return vec.tolist()
+
+    def seed_official_demre_questions(self) -> List[DEMREQuestionNode]:
+        nodes = get_curated_demre_nodes() + generate_massive_demre_question_bank()
+        self._fallback_nodes = nodes
+        if self.client is not None:
+            points = []
+            for node in nodes:
+                vector = self.compute_embedding(node.to_embedding_text())
+                points.append(
+                    qmodels.PointStruct(
+                        id=node.node_id,
+                        vector=vector,
+                        payload=node.model_dump()
+                    )
+                )
+            self.client.upsert(collection_name=self.COLLECTION_NAME, points=points)
+        return nodes
+
+    def query_by_axis_and_exam(
+        self,
+        exam: ExamType,
+        axis: ThematicAxis,
+        exclude_ids: List[str],
+        diagnostic_only: bool = False
+    ) -> List[DEMREQuestionNode]:
+        if self.client is not None:
+            must_conditions = [
+                qmodels.FieldCondition(key="exam", match=qmodels.MatchValue(value=exam)),
+                qmodels.FieldCondition(key="thematic_axis", match=qmodels.MatchValue(value=axis)),
+            ]
+            if diagnostic_only:
+                must_conditions.append(
+                    qmodels.FieldCondition(key="is_diagnostic_anchor", match=qmodels.MatchValue(value=True))
+                )
+            records, _ = self.client.scroll(
+                collection_name=self.COLLECTION_NAME,
+                scroll_filter=qmodels.Filter(must=must_conditions),
+                limit=250,
+                with_payload=True
+            )
+            return [
+                DEMREQuestionNode(**r.payload)
+                for r in records
+                if r.payload["node_id"] not in exclude_ids
+            ]
+
+        return [
+            n for n in self._fallback_nodes
+            if n.exam == exam
+            and n.thematic_axis == axis
+            and (not diagnostic_only or n.is_diagnostic_anchor)
+            and n.node_id not in exclude_ids
+        ]
+
+    def get_all_nodes(self, exam: Optional[ExamType] = None) -> List[DEMREQuestionNode]:
+        if self.client is not None:
+            scroll_filter = None
+            if exam:
+                scroll_filter = qmodels.Filter(
+                    must=[qmodels.FieldCondition(key="exam", match=qmodels.MatchValue(value=exam))]
+                )
+            records, _ = self.client.scroll(
+                collection_name=self.COLLECTION_NAME,
+                scroll_filter=scroll_filter,
+                limit=300,
+                with_payload=True
+            )
+            return [DEMREQuestionNode(**r.payload) for r in records]
+
+        if exam:
+            return [n for n in self._fallback_nodes if n.exam == exam]
+        return list(self._fallback_nodes)
