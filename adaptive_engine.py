@@ -272,6 +272,60 @@ class GoPAESAdaptiveEngine:
         self.sync_to_disk()
         return state
 
+    def build_unit_exercise_queue(
+        self,
+        vector_store,
+        exam: ExamType,
+        axis: ThematicAxis,
+        subtopic_keyword: str,
+        num_questions: int,
+        exclude_ids: Optional[List[str]] = None,
+    ) -> List[DEMREQuestionNode]:
+        """
+        Construye una batería de ejercicios de longitud exacta `num_questions`
+        filtrada específicamente para una unidad/guía de estudio (`subtopic_keyword`),
+        rellenando con reactivos del mismo eje temático y prueba si el usuario pide
+        más preguntas de las disponibles con esa palabra clave exacta.
+        """
+        excluded = set(exclude_ids or [])
+        axis_pool: List[DEMREQuestionNode] = vector_store.query_by_axis_and_exam(
+            exam=exam,
+            axis=axis,
+            exclude_ids=[],
+            diagnostic_only=False,
+        )
+        kw = (subtopic_keyword or "").strip().lower()
+
+        # 1. Prioridad máxima: coincidencia por subtopic_keyword y no vistas recientemente
+        primary_matches = [
+            q for q in axis_pool
+            if (kw in q.subtopic_name.lower() or kw in q.stem_text.lower()) and q.node_id not in excluded
+        ]
+        # 2. Coincidencia por subtopic_keyword aunque ya hayan sido vistas
+        secondary_matches = [
+            q for q in axis_pool
+            if (kw in q.subtopic_name.lower() or kw in q.stem_text.lower()) and q.node_id in excluded
+        ]
+        # 3. Mismo eje temático y prueba (no vistas)
+        axis_unseen = [
+            q for q in axis_pool
+            if q.node_id not in excluded and q not in primary_matches
+        ]
+        # 4. Resto del mismo eje temático
+        axis_remaining = [
+            q for q in axis_pool
+            if q not in primary_matches and q not in secondary_matches and q not in axis_unseen
+        ]
+
+        combined: List[DEMREQuestionNode] = []
+        for candidate in (primary_matches + secondary_matches + axis_unseen + axis_remaining):
+            if candidate.node_id not in [c.node_id for c in combined]:
+                combined.append(candidate)
+            if len(combined) >= num_questions:
+                break
+
+        return combined[:num_questions]
+
     def build_exam_question_queue(
         self,
         vector_store,
@@ -279,8 +333,19 @@ class GoPAESAdaptiveEngine:
         num_questions: int,
         mode: SelectionMode,
         asked_ids: List[str],
-        focus_axis: Optional[ThematicAxis] = None
+        focus_axis: Optional[ThematicAxis] = None,
+        subtopic_keyword: Optional[str] = None,
     ) -> List[DEMREQuestionNode]:
+        if focus_axis is not None and subtopic_keyword:
+            return self.build_unit_exercise_queue(
+                vector_store=vector_store,
+                exam=exam,
+                axis=focus_axis,
+                subtopic_keyword=subtopic_keyword,
+                num_questions=num_questions,
+                exclude_ids=asked_ids,
+            )
+
         queue: List[DEMREQuestionNode] = []
         used_ids = list(asked_ids)
 

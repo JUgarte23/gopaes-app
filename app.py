@@ -81,6 +81,22 @@ if "ai_explanations_cache" not in st.session_state:
 if "interleaved_feedback" not in st.session_state:
     st.session_state.interleaved_feedback = {}
 
+if "selected_guide_id" not in st.session_state:
+    # Controla el menú intermedio de guías: None = mostrar catálogo de unidades; str = mostrar guía específica
+    st.session_state.selected_guide_id = None
+
+if "guide_active_tab" not in st.session_state:
+    # 'THEORY' o 'UNIT_EXERCISES'
+    st.session_state.guide_active_tab = "THEORY"
+
+if "unit_custom_workouts" not in st.session_state:
+    # Diccionario guide_id -> list[DEMREQuestionNode] generadas según la cantidad elegida por el alumno
+    st.session_state.unit_custom_workouts = {}
+
+if "unit_workout_answers" not in st.session_state:
+    # Diccionario f"{guide_id}_{node_id}" -> {"selected": str, "state": ResponseState}
+    st.session_state.unit_workout_answers = {}
+
 if "exam_config" not in st.session_state:
     st.session_state.exam_config = {
         "exam": "M1",
@@ -180,6 +196,7 @@ with st.sidebar:
     )
     if selected_nav != st.session_state.nav_section:
         st.session_state.nav_section = selected_nav
+        st.session_state.selected_guide_id = None
         st.rerun()
 
     st.divider()
@@ -284,14 +301,11 @@ def render_question_card(question: DEMREQuestionNode, step_num: int, total_steps
 
 def render_exhaustive_study_guides_section(exam_target: ExamType):
     """
-    Renderiza la vista independiente de Guías por Materia para PAES M1 o PAES M2.
-    Incluye:
-    - Selector de cambio rápido M1 <-> M2
-    - Marco Teórico Exhaustivo
-    - Formulario Matemático en LaTeX
-    - Receta Algorítmica Paso a Paso
-    - Trampas Frecuentes del DEMRE
-    - Ejercicios de Práctica Intercalados con validación inmediata y resolución paso a paso
+    Renderiza la sección de Guías por Materia (PAES M1 o PAES M2) con arquitectura de 2 niveles:
+    1. MENÚ INTERMEDIO DE UNIDADES: Muestra el catálogo de guías disponibles en el eje temático
+       para que el alumno elija qué guía desarrollar o cuántos ejercicios practicar de esa unidad.
+    2. VISTA DE GUÍA SELECCIONADA: Muestra exclusivamente la guía elegida (Teoría + Fórmulas LaTeX + Receta)
+       y un generador interactivo donde el alumno elige la cantidad exacta de ejercicios a realizar de esa unidad.
     """
     badge_color = "#1d4ed8" if exam_target == "M1" else "#9333ea"
     exam_title = (
@@ -302,49 +316,158 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
 
     col_head, col_switch_exam = st.columns([3, 1])
     with col_head:
-        st.title(f"{'📘' if exam_target == 'M1' else '📕'} Guías Exhaustivas por Materia • {exam_title}")
-        st.caption(
-            "Cada guía incluye el marco teórico curricular del DEMRE, fórmulas en $\\text{LaTeX}$, "
-            "una **Receta Algorítmica Paso a Paso** para abordar los problemas típicos y **ejercicios intercalados interactivos**."
-        )
+        st.title(f"{'📘' if exam_target == 'M1' else '📕'} Guías por Materia • {exam_title}")
     with col_switch_exam:
         other_exam = "M2" if exam_target == "M1" else "M1"
         if st.button(f"🔄 Cambiar a Guías PAES {other_exam}", use_container_width=True):
             st.session_state.nav_section = f"GUIDES_{other_exam}"
+            st.session_state.selected_guide_id = None
             st.rerun()
 
-    # Selector de Eje Temático mediante pestañas o selectbox
-    selected_axis: ThematicAxis = st.selectbox(
-        f"Selecciona el Eje Temático de PAES {exam_target}:",
-        options=ALL_AXES,
-        format_func=lambda a: (
-            f"📐 {AXIS_LABELS[a]} (Tu dominio actual en este eje: {round(engine.axes_state[a].mastery_score * 100)}%)"
-        ),
-        key=f"select_axis_guide_{exam_target}",
-    )
-
     guides_by_axis = get_exhaustive_guides_by_exam(exam_target)
-    axis_guides: list[DEMREExhaustiveGuide] = guides_by_axis.get(selected_axis, [])
 
-    for guide in axis_guides:
+    # Buscar si hay una guía actualmente seleccionada y que pertenezca a este examen (M1 o M2)
+    active_guide: DEMREExhaustiveGuide | None = None
+    if st.session_state.selected_guide_id:
+        for ax_list in guides_by_axis.values():
+            for g in ax_list:
+                if g.guide_id == st.session_state.selected_guide_id and g.exam == exam_target:
+                    active_guide = g
+                    break
+
+    # =========================================================================
+    # NIVEL 1: MENÚ INTERMEDIO DE SELECCIÓN DE GUÍA (CATÁLOGO DE UNIDADES)
+    # =========================================================================
+    if active_guide is None:
+        st.markdown(
+            "Selecciona primero el **Eje Temático** y luego elige en el **Menú de Unidades** "
+            "qué guía específica deseas estudiar o cuántos ejercicios quieres desarrollar de esa unidad."
+        )
+
+        selected_axis: ThematicAxis = st.selectbox(
+            f"1️⃣ Selecciona el Eje Temático de PAES {exam_target}:",
+            options=ALL_AXES,
+            format_func=lambda a: (
+                f"📐 {AXIS_LABELS[a]} — {len(guides_by_axis.get(a, []))} unidad(es) disponible(s) "
+                f"(Tu dominio actual: {round(engine.axes_state[a].mastery_score * 100)}%)"
+            ),
+            key=f"select_axis_guide_{exam_target}",
+        )
+
+        axis_guides: list[DEMREExhaustiveGuide] = guides_by_axis.get(selected_axis, [])
+        st.markdown(f"### 🗂️ 2️⃣ Menú de Guías Disponibles en **{AXIS_LABELS[selected_axis]} ({exam_target})**")
+        st.caption("Elige la unidad que quieres abrir o configura directamente una práctica de ejercicios para esa unidad:")
+
+        for idx_g, guide in enumerate(axis_guides, start=1):
+            with st.container(border=True):
+                col_info, col_actions = st.columns([3, 2])
+
+                with col_info:
+                    st.markdown(
+                        f"<div style='display:flex; align-items:center; gap:10px; flex-wrap:wrap;'>"
+                        f"<span style='background:{badge_color}; color:white; padding:3px 10px; border-radius:99px; font-size:0.8rem; font-weight:bold;'>"
+                        f"Guía #{idx_g} • {guide.exam}</span>"
+                        f"<h4 style='margin:0;'>{guide.unit_title}</h4>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"📌 {guide.demre_syllabus_reference}")
+                    if guide.short_description:
+                        st.write(guide.short_description)
+                    st.markdown(
+                        f"🧮 **{len(guide.key_formulas)}** Fórmulas $\\text{{LaTeX}}$ | "
+                        f"🧑‍🍳 **{len(guide.resolution_recipe_steps)}** Pasos de Receta | "
+                        f"⚠️ **{len(guide.common_demre_traps)}** Trampas DEMRE"
+                    )
+
+                with col_actions:
+                    if st.button(
+                        "📖 Abrir Guía de Estudio (Teoría + Receta)",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"btn_open_theory_{guide.guide_id}",
+                    ):
+                        st.session_state.selected_guide_id = guide.guide_id
+                        st.session_state.guide_active_tab = "THEORY"
+                        st.rerun()
+
+                    c_num, c_go = st.columns([1, 2])
+                    with c_num:
+                        num_ex_menu = st.number_input(
+                            "N° Ejercicios:",
+                            min_value=1,
+                            max_value=20,
+                            value=5,
+                            step=1,
+                            key=f"menu_num_ex_{guide.guide_id}",
+                        )
+                    with c_go:
+                        st.write("")
+                        if st.button(
+                            f"🏋️ Practicar {num_ex_menu} Ejercicios",
+                            use_container_width=True,
+                            key=f"btn_open_ex_{guide.guide_id}",
+                        ):
+                            st.session_state.selected_guide_id = guide.guide_id
+                            st.session_state.guide_active_tab = "UNIT_EXERCISES"
+                            st.session_state.unit_custom_workouts[guide.guide_id] = engine.build_unit_exercise_queue(
+                                vector_store=st.session_state.vector_store,
+                                exam=guide.exam,
+                                axis=guide.thematic_axis,
+                                subtopic_keyword=guide.subtopic_filter_keyword,
+                                num_questions=int(num_ex_menu),
+                                exclude_ids=st.session_state.asked_ids,
+                            )
+                            st.rerun()
+        return
+
+    # =========================================================================
+    # NIVEL 2: VISTA DETALLADA DE LA GUÍA ELEGIDA + PRÁCTICA PERSONALIZADA DE LA UNIDAD
+    # =========================================================================
+    col_back, col_unit_badge = st.columns([1, 3])
+    with col_back:
+        if st.button("⬅️ Volver al Menú de Guías", use_container_width=True):
+            st.session_state.selected_guide_id = None
+            st.rerun()
+    with col_unit_badge:
+        st.markdown(
+            f"<div style='text-align:right;'>"
+            f"<span style='background:{badge_color}; color:white; padding:5px 14px; border-radius:99px; font-size:0.88rem; font-weight:bold;'>"
+            f"{AXIS_LABELS[active_guide.thematic_axis]} • Currículo {active_guide.exam}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.header(active_guide.unit_title)
+    st.caption(f"📌 {active_guide.demre_syllabus_reference}")
+
+    # Selector de vista dentro de la unidad: Estudio Teórico vs Ejercicios de la Unidad
+    tab_options = {
+        "THEORY": "📖 1. Marco Teórico, Fórmulas LaTeX y Receta Paso a Paso",
+        "UNIT_EXERCISES": "🏋️ 2. Desarrollar Ejercicios de esta Unidad (Elige la Cantidad)",
+    }
+    chosen_subview = st.radio(
+        "Modo de trabajo en esta guía:",
+        options=list(tab_options.keys()),
+        format_func=lambda k: tab_options[k],
+        index=0 if st.session_state.guide_active_tab == "THEORY" else 1,
+        horizontal=True,
+        key=f"subview_radio_{active_guide.guide_id}",
+    )
+    if chosen_subview != st.session_state.guide_active_tab:
+        st.session_state.guide_active_tab = chosen_subview
+        st.rerun()
+
+    st.divider()
+
+    if st.session_state.guide_active_tab == "THEORY":
         with st.container(border=True):
-            st.markdown(
-                f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                f"<h3 style='margin:0;'>{guide.unit_title}</h3>"
-                f"<span style='background:{badge_color}; color:white; padding:4px 12px; border-radius:99px; font-size:0.85rem; font-weight:bold;'>"
-                f"Exclusivo Currículo {guide.exam}</span></div>",
-                unsafe_allow_html=True,
-            )
-            st.caption(f"📌 {guide.demre_syllabus_reference}")
-            st.divider()
-
             # 1. Marco Teórico Exhaustivo
-            st.markdown(guide.theoretical_framework_md)
+            st.markdown(active_guide.theoretical_framework_md)
             st.divider()
 
             # 2. Formulario Oficial en LaTeX
             st.markdown("#### 🧮 Formulario y Propiedades Fundamentales ($\\text{LaTeX}$)")
-            for f_card in guide.key_formulas:
+            for f_card in active_guide.key_formulas:
                 with st.container(border=True):
                     st.markdown(f"**{f_card.title}**")
                     st.latex(f_card.latex_formula)
@@ -353,25 +476,25 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
             st.divider()
 
             # 3. Receta Algorítmica Paso a Paso
-            st.markdown(f"#### 🧑‍🍳 {guide.resolution_recipe_title}")
+            st.markdown(f"#### 🧑‍🍳 {active_guide.resolution_recipe_title}")
             st.info(
-                "Sigue este algoritmo paso a paso cada vez que te enfrentes a un problema de este tema en el ensayo:"
+                "Sigue este algoritmo paso a paso cada vez que te enfrentes a un problema de esta unidad:"
             )
-            for recipe_step in guide.resolution_recipe_steps:
+            for recipe_step in active_guide.resolution_recipe_steps:
                 st.markdown(f"- ✅ **{recipe_step}**")
 
             st.divider()
 
             # 4. Trampas y Distractores Clásicos del DEMRE
             st.markdown("#### ⚠️ Trampas y Errores Frecuentes del DEMRE a Evitar")
-            for trap in guide.common_demre_traps:
+            for trap in active_guide.common_demre_traps:
                 st.warning(f"🔎 {trap}")
 
             st.divider()
 
-            # 5. Ejercicios de Práctica Intercalados Interactivos
-            st.markdown("#### ✍️ Ejercicios de Práctica Intercalados (Aplica la Receta)")
-            for ex in guide.interleaved_exercises:
+            # 5. Ejemplos Guiados Intercalados de la Unidad
+            st.markdown("#### ✍️ Ejemplos Guiados Paso a Paso de la Unidad")
+            for ex in active_guide.interleaved_exercises:
                 with st.container(border=True):
                     st.markdown(f"##### 🎯 {ex.title}")
                     st.write(ex.stem_text)
@@ -385,7 +508,7 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                             st.latex(opt_latex)
 
                     chosen_ex_opt = st.radio(
-                        "Pon a prueba lo aprendido:",
+                        "Resuelve este ejemplo:",
                         options=list(ex.options.keys()),
                         format_func=lambda k: f"Alternativa {k}",
                         horizontal=True,
@@ -411,33 +534,223 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                         for s_line in ex.step_by_step_solution:
                             st.markdown(s_line)
 
-    # Botón directo para entrenar este eje y prueba en el motor de ensayos
-    if st.button(
-        f"🔥 Lanzar Práctica Adaptativa de 5 Preguntas en {AXIS_LABELS[selected_axis]} ({exam_target})",
-        type="primary",
-        use_container_width=True,
-        key=f"launch_practice_{exam_target}_{selected_axis}",
-    ):
-        queue_focus = engine.build_exam_question_queue(
-            vector_store=st.session_state.vector_store,
-            exam=exam_target,
-            num_questions=5,
-            mode="ADAPTIVE",
-            asked_ids=st.session_state.asked_ids,
-            focus_axis=selected_axis,
+        # CTA al final de la teoría para pasar a ejercitar esta unidad eligiendo cantidad
+        with st.container(border=True):
+            st.subheader("🏋️ ¿Listo para ejercitar esta unidad?")
+            col_s1, col_s2 = st.columns([2, 2])
+            with col_s1:
+                qty_from_theory = st.slider(
+                    "Elige cuántos ejercicios de esta unidad quieres realizar ahora:",
+                    min_value=1,
+                    max_value=20,
+                    value=5,
+                    key=f"slider_from_theory_{active_guide.guide_id}",
+                )
+            with col_s2:
+                st.write("")
+                if st.button(
+                    f"🚀 Generar {qty_from_theory} Ejercicios de esta Unidad",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"btn_gen_from_theory_{active_guide.guide_id}",
+                ):
+                    st.session_state.unit_custom_workouts[active_guide.guide_id] = engine.build_unit_exercise_queue(
+                        vector_store=st.session_state.vector_store,
+                        exam=active_guide.exam,
+                        axis=active_guide.thematic_axis,
+                        subtopic_keyword=active_guide.subtopic_filter_keyword,
+                        num_questions=int(qty_from_theory),
+                        exclude_ids=st.session_state.asked_ids,
+                    )
+                    st.session_state.guide_active_tab = "UNIT_EXERCISES"
+                    st.rerun()
+
+    else:
+        # =====================================================================
+        # PESTAÑA 2: GENERADOR Y ENTRENADOR DE EJERCICIOS DE LA UNIDAD
+        # =====================================================================
+        with st.container(border=True):
+            st.subheader(f"🏋️ Práctica Personalizada • {active_guide.unit_title}")
+            st.write(
+                "Elige la **cantidad exacta de ejercicios** que deseas realizar sobre esta unidad. "
+                "Puedes resolverlos directamente aquí con retroalimentación inmediata en $\\text{LaTeX}$ "
+                "o abrirlos en el simulador de ensayo."
+            )
+
+            col_cfg_qty, col_btn_inline, col_btn_exam = st.columns([2, 2, 2])
+            current_list: list[DEMREQuestionNode] = st.session_state.unit_custom_workouts.get(
+                active_guide.guide_id, []
+            )
+            default_qty = len(current_list) if current_list else 5
+
+            with col_cfg_qty:
+                desired_qty = st.slider(
+                    "Cantidad de ejercicios de esta unidad:",
+                    min_value=1,
+                    max_value=20,
+                    value=default_qty,
+                    key=f"unit_qty_slider_{active_guide.guide_id}",
+                )
+            with col_btn_inline:
+                st.write("")
+                if st.button(
+                    f"🔄 Cargar {desired_qty} Ejercicios Aquí Mismo",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"btn_reload_inline_{active_guide.guide_id}",
+                ):
+                    st.session_state.unit_custom_workouts[active_guide.guide_id] = engine.build_unit_exercise_queue(
+                        vector_store=st.session_state.vector_store,
+                        exam=active_guide.exam,
+                        axis=active_guide.thematic_axis,
+                        subtopic_keyword=active_guide.subtopic_filter_keyword,
+                        num_questions=int(desired_qty),
+                        exclude_ids=st.session_state.asked_ids,
+                    )
+                    st.rerun()
+            with col_btn_exam:
+                st.write("")
+                if st.button(
+                    f"⏱️ Abrir {desired_qty} Ejercicios en Modo Ensayo",
+                    use_container_width=True,
+                    key=f"btn_launch_unit_exam_{active_guide.guide_id}",
+                ):
+                    queue_unit = engine.build_unit_exercise_queue(
+                        vector_store=st.session_state.vector_store,
+                        exam=active_guide.exam,
+                        axis=active_guide.thematic_axis,
+                        subtopic_keyword=active_guide.subtopic_filter_keyword,
+                        num_questions=int(desired_qty),
+                        exclude_ids=st.session_state.asked_ids,
+                    )
+                    st.session_state.exam_config = {
+                        "exam": active_guide.exam,
+                        "num_questions": len(queue_unit),
+                        "timed_mode": False,
+                        "allocated_seconds": len(queue_unit) * OFFICIAL_SECONDS_PER_QUESTION[active_guide.exam],
+                        "selection_mode": "ADAPTIVE",
+                    }
+                    st.session_state.exam_queue = queue_unit
+                    st.session_state.exam_history = []
+                    st.session_state.exam_subphase = "ACTIVE_RUN"
+                    st.session_state.nav_section = "EXAMS"
+                    st.rerun()
+
+        # Si aún no hay lista cargada para esta guía, generarla automáticamente con `desired_qty`
+        if active_guide.guide_id not in st.session_state.unit_custom_workouts:
+            st.session_state.unit_custom_workouts[active_guide.guide_id] = engine.build_unit_exercise_queue(
+                vector_store=st.session_state.vector_store,
+                exam=active_guide.exam,
+                axis=active_guide.thematic_axis,
+                subtopic_keyword=active_guide.subtopic_filter_keyword,
+                num_questions=int(desired_qty),
+                exclude_ids=st.session_state.asked_ids,
+            )
+
+        workout_questions: list[DEMREQuestionNode] = st.session_state.unit_custom_workouts[active_guide.guide_id]
+
+        # Mostrar progreso de la batería de ejercicios de la unidad
+        answered_in_unit = sum(
+            1
+            for q_node in workout_questions
+            if f"{active_guide.guide_id}_{q_node.node_id}" in st.session_state.unit_workout_answers
         )
-        st.session_state.exam_config = {
-            "exam": exam_target,
-            "num_questions": len(queue_focus),
-            "timed_mode": False,
-            "allocated_seconds": len(queue_focus) * OFFICIAL_SECONDS_PER_QUESTION[exam_target],
-            "selection_mode": "ADAPTIVE",
-        }
-        st.session_state.exam_queue = queue_focus
-        st.session_state.exam_history = []
-        st.session_state.exam_subphase = "ACTIVE_RUN"
-        st.session_state.nav_section = "EXAMS"
-        st.rerun()
+        st.progress(
+            answered_in_unit / max(1, len(workout_questions)),
+            text=f"Progreso en esta unidad: {answered_in_unit} de {len(workout_questions)} ejercicio(s) respondido(s)",
+        )
+
+        # Renderizar cada uno de los N ejercicios seleccionados por el usuario
+        for q_idx, q_node in enumerate(workout_questions, start=1):
+            ans_key = f"{active_guide.guide_id}_{q_node.node_id}"
+            with st.container(border=True):
+                render_question_card(
+                    question=q_node,
+                    step_num=q_idx,
+                    total_steps=len(workout_questions),
+                    badge_text=f"🏋️ Práctica de Unidad ({active_guide.exam})",
+                )
+
+                chosen_unit_opt = st.radio(
+                    "Selecciona tu respuesta:",
+                    options=[o.key for o in q_node.options],
+                    format_func=lambda k: f"Alternativa {k}",
+                    horizontal=True,
+                    key=f"unit_q_radio_{ans_key}_{q_idx}",
+                )
+
+                col_check, col_omit_u = st.columns(2)
+                with col_check:
+                    if st.button(
+                        "✅ Comprobar Alternativa",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"btn_unit_check_{ans_key}_{q_idx}",
+                    ):
+                        state_res = engine.process_response(
+                            question=q_node,
+                            selected_option=chosen_unit_opt,
+                            phase_label=f"Guía {active_guide.exam}",
+                        )
+                        st.session_state.asked_ids.append(q_node.node_id)
+                        st.session_state.unit_workout_answers[ans_key] = {
+                            "selected": chosen_unit_opt,
+                            "state": state_res,
+                        }
+                        st.rerun()
+
+                with col_omit_u:
+                    if st.button(
+                        "🏳️ Dejar en Blanco y Ver Explicación Paso a Paso",
+                        use_container_width=True,
+                        key=f"btn_unit_omit_{ans_key}_{q_idx}",
+                    ):
+                        state_res = engine.process_response(
+                            question=q_node,
+                            selected_option="OMIT",
+                            phase_label=f"Guía {active_guide.exam}",
+                        )
+                        st.session_state.asked_ids.append(q_node.node_id)
+                        st.session_state.unit_workout_answers[ans_key] = {
+                            "selected": None,
+                            "state": state_res,
+                        }
+                        st.rerun()
+
+                # Si el alumno ya comprobó u omitió este ejercicio, mostrar feedback y Coaching IA en LaTeX
+                if ans_key in st.session_state.unit_workout_answers:
+                    record = st.session_state.unit_workout_answers[ans_key]
+                    u_sel = record["selected"]
+                    u_state = record["state"]
+                    ai_cache_key = f"unit_{ans_key}_{u_sel}_{u_state}"
+
+                    st.divider()
+                    if u_state == "CORRECT":
+                        st.success(
+                            f"🎉 **¡Correcto!** Marcaste la alternativa **{u_sel})**, que coincide con la pauta oficial DEMRE."
+                        )
+                    elif u_state == "OMITTED":
+                        st.warning(
+                            f"🏳️ **Pregunta omitida (Vacío de Conocimiento registrado).** "
+                            f"La alternativa correcta según el DEMRE es la **{q_node.correct_option})**."
+                        )
+                    else:
+                        st.error(
+                            f"❌ **Respuesta incorrecta.** Marcaste **{u_sel})**, pero la clave oficial DEMRE es la **{q_node.correct_option})**."
+                        )
+
+                    if ai_cache_key not in st.session_state.ai_explanations_cache:
+                        with st.spinner("🤖 Generando resolución paso a paso en LaTeX..."):
+                            explanation = GoPAESLLMCoach.generate_live_latex_explanation(
+                                question=q_node,
+                                selected_option=u_sel,
+                                state=u_state,
+                                api_key_override=st.session_state.get("llm_manual_key"),
+                                provider_override=st.session_state.get("llm_provider_choice"),
+                            )
+                            st.session_state.ai_explanations_cache[ai_cache_key] = explanation
+
+                    st.markdown(st.session_state.ai_explanations_cache[ai_cache_key])
 
 
 # =====================================================================
@@ -504,10 +817,12 @@ if st.session_state.nav_section == "DASHBOARD":
             c_g1, c_g2 = st.columns(2)
             with c_g1:
                 if st.button("📘 Guías PAES M1", use_container_width=True):
+                    st.session_state.selected_guide_id = None
                     st.session_state.nav_section = "GUIDES_M1"
                     st.rerun()
             with c_g2:
                 if st.button("📕 Guías PAES M2", use_container_width=True):
+                    st.session_state.selected_guide_id = None
                     st.session_state.nav_section = "GUIDES_M2"
                     st.rerun()
 
