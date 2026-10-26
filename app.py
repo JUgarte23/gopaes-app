@@ -220,7 +220,7 @@ with st.sidebar:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     st.divider()
-    col_switch, col_ wipe = st.columns(2)
+    col_switch, col_wipe = st.columns(2)
     with col_switch:
         if st.button("👤 Cambiar Usuario", use_container_width=True):
             logout_profile()
