@@ -1,6 +1,9 @@
 import os
 import json
 import math
+import hmac
+import hashlib
+import secrets
 import datetime
 import requests
 from pathlib import Path
@@ -110,6 +113,8 @@ def _default_micro_units_state() -> Dict[str, MicroUnitMasteryState]:
 
 class UserProfileData(BaseModel):
     username: str
+    password_hash: str = ""
+    password_salt: str = ""
     created_at: str = Field(default_factory=lambda: datetime.date.today().isoformat())
     last_activity_date: str = Field(default_factory=lambda: datetime.date.today().isoformat())
     study_streak: int = 1
@@ -126,6 +131,16 @@ class UserProfileData(BaseModel):
 
 class GoPAESProfileManager:
     STORAGE_PATH = Path("./storage/gopaes_profiles.json")
+
+    @staticmethod
+    def _hash_password(password: str, salt_hex: str) -> str:
+        dk = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            100_000,
+        )
+        return dk.hex()
 
     @classmethod
     def _ensure_storage(cls) -> Dict[str, dict]:
@@ -144,6 +159,96 @@ class GoPAESProfileManager:
         return sorted(list(data.keys()))
 
     @classmethod
+    def register_user(
+        cls, username: str, password: str
+    ) -> Tuple[bool, str, Optional[UserProfileData]]:
+        clean_name = username.strip()
+        if not clean_name:
+            return False, "Por favor ingresa un nombre de usuario válido.", None
+        if len(password) < 4:
+            return False, "La contraseña debe tener al menos 4 caracteres.", None
+
+        data = cls._ensure_storage()
+        # Verificar si el usuario ya existe (insensible a mayúsculas/minúsculas)
+        existing_key = next(
+            (k for k in data.keys() if k.lower() == clean_name.lower()), None
+        )
+        if existing_key is not None:
+            existing_prof = data[existing_key]
+            if existing_prof.get("password_hash"):
+                return (
+                    False,
+                    f"El usuario '{existing_key}' ya está registrado. Ve a la pestaña 'Iniciar Sesión'.",
+                    None,
+                )
+            # Si era un perfil antiguo sin contraseña, le asignamos esta nueva contraseña conservando sus datos
+            clean_name = existing_key
+
+        salt_hex = secrets.token_hex(16)
+        pwd_hash = cls._hash_password(password, salt_hex)
+
+        if existing_key is not None:
+            profile = UserProfileData(**data[existing_key])
+            profile.password_salt = salt_hex
+            profile.password_hash = pwd_hash
+        else:
+            profile = UserProfileData(
+                username=clean_name,
+                password_salt=salt_hex,
+                password_hash=pwd_hash,
+            )
+
+        cls.save_profile(profile)
+        return True, f"Cuenta creada exitosamente para {profile.username}.", profile
+
+    @classmethod
+    def authenticate_user(
+        cls, username: str, password: str
+    ) -> Tuple[bool, str, Optional[UserProfileData]]:
+        clean_name = username.strip()
+        if not clean_name or not password:
+            return False, "Por favor ingresa tu usuario y contraseña.", None
+
+        data = cls._ensure_storage()
+        matched_key = next(
+            (k for k in data.keys() if k.lower() == clean_name.lower()), None
+        )
+        if matched_key is None:
+            return (
+                False,
+                f"No existe una cuenta registrada para '{clean_name}'. Regístrate primero en la pestaña 'Registrarse'.",
+                None,
+            )
+
+        raw_prof = data[matched_key]
+        stored_hash = raw_prof.get("password_hash", "")
+        stored_salt = raw_prof.get("password_salt", "")
+
+        # Si es un perfil legado creado antes del sistema de contraseñas, vincular la contraseña ingresada
+        if not stored_hash or not stored_salt:
+            salt_hex = secrets.token_hex(16)
+            new_hash = cls._hash_password(password, salt_hex)
+            raw_prof["password_salt"] = salt_hex
+            raw_prof["password_hash"] = new_hash
+            data[matched_key] = raw_prof
+            cls.STORAGE_PATH.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            profile = cls.load_or_create_profile(matched_key)
+            return (
+                True,
+                f"Contraseña configurada y sesión iniciada para {profile.username}.",
+                profile,
+            )
+
+        candidate_hash = cls._hash_password(password, stored_salt)
+        if not hmac.compare_digest(stored_hash, candidate_hash):
+            return False, "❌ Contraseña incorrecta. Verifica tus credenciales.", None
+
+        profile = cls.load_or_create_profile(matched_key)
+        return True, f"Bienvenido nuevamente, {profile.username}.", profile
+
+    @classmethod
     def load_or_create_profile(cls, username: str) -> UserProfileData:
         clean_name = username.strip()
         data = cls._ensure_storage()
@@ -152,7 +257,6 @@ class GoPAESProfileManager:
         if clean_name in data:
             raw_prof = data[clean_name]
             profile = UserProfileData(**raw_prof)
-            # Asegurar que todas las 20 micro-unidades existan incluso en perfiles antiguos
             default_units = _default_micro_units_state()
             for uid, def_state in default_units.items():
                 if uid not in profile.micro_units_state:

@@ -1,5 +1,9 @@
 import os
-import math
+import json
+import hmac
+import hashlib
+import secrets
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 
@@ -31,158 +35,18 @@ from adaptive_engine import (
     ALL_AXES,
 )
 
-# Importación resiliente del catálogo de Micro-Unidades DEMRE
-try:
-    from demre_ingestion_pipeline import MICRO_UNITS_CATALOG, get_micro_units_for_exam_and_axis
-    from adaptive_engine import MicroUnitMasteryState
-except ImportError:
-    MICRO_UNITS_CATALOG = {}
-    def get_micro_units_for_exam_and_axis(exam, axis=None):
-        return []
-    MicroUnitMasteryState = None
-
 # =====================================================================
 # CONFIGURACIÓN DE PÁGINA STREAMLIT - GOPAES
 # =====================================================================
 st.set_page_config(
-    page_title="GoPAES | Plataforma Adaptativa por Micro-Unidades DEMRE (M1 y M2)",
+    page_title="GoPAES | Plataforma Adaptativa PAES (M1 y M2)",
     page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # =====================================================================
-# CATÁLOGO CANÓNICO DE LAS 20 MICRO-UNIDADES OFICIALES DEMRE
-# =====================================================================
-CANONICAL_MICRO_UNITS = {
-    # Eje Números
-    "NUM_CONJUNTOS": {
-        "name": "Conjuntos Numéricos (Enteros, Racionales y Reales M2)",
-        "axis": "NUMEROS",
-        "exams": ["M1", "M2"],
-        "keyword": "conjuntos",
-    },
-    "NUM_RAZONES_PROP": {
-        "name": "Razones y Proporciones",
-        "axis": "NUMEROS",
-        "exams": ["M1", "M2"],
-        "keyword": "razones",
-    },
-    "NUM_PORCENTAJES": {
-        "name": "Porcentajes",
-        "axis": "NUMEROS",
-        "exams": ["M1", "M2"],
-        "keyword": "porcentaje",
-    },
-    # Eje Álgebra y Funciones
-    "ALG_EXPRESIONES": {
-        "name": "Expresiones Algebraicas",
-        "axis": "ALGEBRA_Y_FUNCIONES",
-        "exams": ["M1", "M2"],
-        "keyword": "expresiones",
-    },
-    "ALG_ECUACIONES_1G": {
-        "name": "Ecuaciones e Inecuaciones de 1° Grado",
-        "axis": "ALGEBRA_Y_FUNCIONES",
-        "exams": ["M1", "M2"],
-        "keyword": "inecuación",
-    },
-    "ALG_SISTEMAS_2X2": {
-        "name": "Sistemas de Ecuaciones (2x2)",
-        "axis": "ALGEBRA_Y_FUNCIONES",
-        "exams": ["M1", "M2"],
-        "keyword": "sistemas",
-    },
-    "ALG_FUNCION_LINEAL": {
-        "name": "Función Lineal y Afín",
-        "axis": "ALGEBRA_Y_FUNCIONES",
-        "exams": ["M1", "M2"],
-        "keyword": "lineal",
-    },
-    "ALG_FUNCION_CUADRATICA": {
-        "name": "Función Cuadrática",
-        "axis": "ALGEBRA_Y_FUNCIONES",
-        "exams": ["M1", "M2"],
-        "keyword": "cuadrática",
-    },
-    # Eje Geometría
-    "GEO_FIGURAS_2D": {
-        "name": "Perímetro y Área de Figuras 2D",
-        "axis": "GEOMETRIA",
-        "exams": ["M1", "M2"],
-        "keyword": "trapecio",
-    },
-    "GEO_CUERPOS_3D": {
-        "name": "Cuerpos Geométricos 3D",
-        "axis": "GEOMETRIA",
-        "exams": ["M1", "M2"],
-        "keyword": "cilíndrico",
-    },
-    "GEO_ISOMETRICAS": {
-        "name": "Transformaciones Isométricas",
-        "axis": "GEOMETRIA",
-        "exams": ["M1", "M2"],
-        "keyword": "isométrica",
-    },
-    "GEO_PITAGORAS": {
-        "name": "Teorema de Pitágoras",
-        "axis": "GEOMETRIA",
-        "exams": ["M1", "M2"],
-        "keyword": "pitágoras",
-    },
-    "GEO_SEMEJANZA": {
-        "name": "Semejanza y Proporcionalidad",
-        "axis": "GEOMETRIA",
-        "exams": ["M1", "M2"],
-        "keyword": "semejanza",
-    },
-    "GEO_HOMOTECIA_M2": {
-        "name": "Homotecia (Solo M2)",
-        "axis": "GEOMETRIA",
-        "exams": ["M2"],
-        "keyword": "homotecia",
-    },
-    "GEO_TRIGONOMETRIA_M2": {
-        "name": "Razones Trigonométricas (Solo M2)",
-        "axis": "GEOMETRIA",
-        "exams": ["M2"],
-        "keyword": "elevación",
-    },
-    # Eje Probabilidad y Estadística
-    "PROB_TABLAS_GRAFICOS": {
-        "name": "Representación de Datos (Tablas y Gráficos)",
-        "axis": "PROBABILIDAD_Y_ESTADISTICA",
-        "exams": ["M1", "M2"],
-        "keyword": "frecuencia",
-    },
-    "PROB_TENDENCIA_CENTRAL": {
-        "name": "Medidas de Tendencia Central",
-        "axis": "PROBABILIDAD_Y_ESTADISTICA",
-        "exams": ["M1", "M2"],
-        "keyword": "promedio",
-    },
-    "PROB_POSICION": {
-        "name": "Medidas de Posición (Cuartiles/Percentiles)",
-        "axis": "PROBABILIDAD_Y_ESTADISTICA",
-        "exams": ["M1", "M2"],
-        "keyword": "cuartil",
-    },
-    "PROB_REGLAS": {
-        "name": "Reglas de Probabilidad",
-        "axis": "PROBABILIDAD_Y_ESTADISTICA",
-        "exams": ["M1", "M2"],
-        "keyword": "probabilidad",
-    },
-    "PROB_CONTEO_M2": {
-        "name": "Técnicas de Conteo / Combinatoria (Solo M2)",
-        "axis": "PROBABILIDAD_Y_ESTADISTICA",
-        "exams": ["M2"],
-        "keyword": "combinatoria",
-    },
-}
-
-# =====================================================================
-# INICIALIZACIÓN DE BASE VECTORIAL QDRANT (+220 REACTIVOS MICRO-UNIDADES)
+# INICIALIZACIÓN DE BASE VECTORIAL QDRANT
 # =====================================================================
 if "vector_store" not in st.session_state:
     store = GoPAESVectorStore()
@@ -221,8 +85,9 @@ if "ai_explanations_cache" not in st.session_state:
 if "interleaved_feedback" not in st.session_state:
     st.session_state.interleaved_feedback = {}
 
-if "selected_guide_id" not in st.session_state:
-    st.session_state.selected_guide_id = None
+if "selected_guide_axis" not in st.session_state:
+    # Controla el menú intermedio de las 4 Unidades (None = mostrar catálogo de las 4 unidades)
+    st.session_state.selected_guide_axis = None
 
 if "unit_custom_workouts" not in st.session_state:
     st.session_state.unit_custom_workouts = {}
@@ -236,245 +101,245 @@ if "exam_config" not in st.session_state:
         "num_questions": 5,
         "timed_mode": True,
         "selection_mode": "ADAPTIVE",
-        "focus_micro_unit_id": None,
+        "focus_axis": None,
     }
 
 
 # =====================================================================
-# FUNCIONES AUXILIARES RESILIENTES PARA MICRO-UNIDADES Y GUÍAS
+# SISTEMA DE AUTENTICACIÓN SEGURO (USUARIO + CONTRASEÑA CON HASH SHA-256)
 # =====================================================================
-def get_micro_unit_mastery_pct(engine_inst: GoPAESAdaptiveEngine, micro_unit_id: str) -> float:
-    mu_dict = getattr(engine_inst, "micro_units_state", None)
-    if mu_dict and micro_unit_id in mu_dict:
-        return round(mu_dict[micro_unit_id].mastery_score * 100, 1)
-    meta = CANONICAL_MICRO_UNITS.get(micro_unit_id)
-    if meta:
-        ax = meta["axis"]
-        return round(engine_inst.axes_state[ax].mastery_score * 100, 1)
-    return 50.0
+AUTH_CREDENTIALS_PATH = Path("./storage/gopaes_credentials.json")
 
 
-def get_micro_unit_probabilities_safe(
-    engine_inst: GoPAESAdaptiveEngine, exam: ExamType = "M1", mode: SelectionMode = "ADAPTIVE"
-) -> dict[str, float]:
-    if hasattr(engine_inst, "compute_micro_unit_sampling_probabilities"):
-        return engine_inst.compute_micro_unit_sampling_probabilities(exam=exam, mode=mode)
+def _hash_pwd_local(password: str, salt_hex: str) -> str:
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt_hex),
+        100_000,
+    )
+    return dk.hex()
 
-    valid_ids = [uid for uid, m in CANONICAL_MICRO_UNITS.items() if exam in m["exams"]]
-    if not valid_ids:
+
+def _load_credentials_store() -> dict:
+    AUTH_CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not AUTH_CREDENTIALS_PATH.exists():
+        AUTH_CREDENTIALS_PATH.write_text("{}", encoding="utf-8")
         return {}
-    uniform = round(1.0 / len(valid_ids), 4)
-    return {uid: uniform for uid in valid_ids}
+    try:
+        return json.loads(AUTH_CREDENTIALS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
-def get_guide_micro_unit_id(guide: DEMREExhaustiveGuide) -> str:
-    mu_id = getattr(guide, "micro_unit_id", "")
-    if mu_id and mu_id in CANONICAL_MICRO_UNITS:
-        return mu_id
-    title_l = guide.unit_title.lower()
-    if "razones y proporciones" in title_l:
-        return "NUM_RAZONES_PROP"
-    if "porcentaje" in title_l or "financiera" in title_l:
-        return "NUM_PORCENTAJES"
-    if "expresiones" in title_l:
-        return "ALG_EXPRESIONES"
-    if "ecuaciones e inecuaciones" in title_l or "1° grado" in title_l:
-        return "ALG_ECUACIONES_1G"
-    if "sistemas" in title_l:
-        return "ALG_SISTEMAS_2X2"
-    if "lineal" in title_l or "afín" in title_l:
-        return "ALG_FUNCION_LINEAL"
-    if "cuadrática" in title_l:
-        return "ALG_FUNCION_CUADRATICA"
-    if "2d" in title_l or "perímetro y área" in title_l:
-        return "GEO_FIGURAS_2D"
-    if "3d" in title_l or "cuerpos" in title_l:
-        return "GEO_CUERPOS_3D"
-    if "isométrica" in title_l:
-        return "GEO_ISOMETRICAS"
-    if "pitágoras" in title_l:
-        return "GEO_PITAGORAS"
-    if "semejanza" in title_l:
-        return "GEO_SEMEJANZA"
-    if "homotecia" in title_l:
-        return "GEO_HOMOTECIA_M2"
-    if "trigonométrica" in title_l:
-        return "GEO_TRIGONOMETRIA_M2"
-    if "tablas" in title_l or "representación" in title_l:
-        return "PROB_TABLAS_GRAFICOS"
-    if "tendencia central" in title_l:
-        return "PROB_TENDENCIA_CENTRAL"
-    if "posición" in title_l or "cuartil" in title_l:
-        return "PROB_POSICION"
-    if "reglas de probabilidad" in title_l:
-        return "PROB_REGLAS"
-    if "conteo" in title_l or "combinatoria" in title_l:
-        return "PROB_CONTEO_M2"
-    return "NUM_CONJUNTOS"
-
-
-def _get_guide_short_desc(guide: DEMREExhaustiveGuide) -> str:
-    desc = getattr(guide, "short_description", "")
-    if desc:
-        return desc
-    return (
-        f"Micro-unidad oficial del temario DEMRE para {guide.unit_title}. "
-        f"Incluye marco teórico, formulario en LaTeX, receta paso a paso y ejercicios con comprobación inmediata."
+def _save_credentials_store(data: dict) -> None:
+    AUTH_CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AUTH_CREDENTIALS_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
-def _get_guide_subtopic_kw(guide: DEMREExhaustiveGuide) -> str:
-    kw = getattr(guide, "subtopic_filter_keyword", "")
-    if kw:
-        return kw
-    mu_id = get_guide_micro_unit_id(guide)
-    return CANONICAL_MICRO_UNITS.get(mu_id, {}).get("keyword", "enteros")
+def register_student_account(username: str, password: str, confirm_password: str) -> tuple[bool, str]:
+    clean_user = username.strip()
+    if not clean_user:
+        return False, "Por favor escribe un nombre de usuario."
+    if len(clean_user) < 3:
+        return False, "El nombre de usuario debe tener al menos 3 caracteres."
+    if len(password) < 4:
+        return False, "La contraseña debe tener al menos 4 caracteres."
+    if password != confirm_password:
+        return False, "Las contraseñas no coinciden. Verifícalas e inténtalo de nuevo."
 
+    # Si GoPAESProfileManager tiene register_user nativo, usarlo y sincronizar
+    if hasattr(GoPAESProfileManager, "register_user"):
+        ok, msg, prof = GoPAESProfileManager.register_user(clean_user, password)
+        if not ok or prof is None:
+            return False, msg
+        st.session_state.active_username = prof.username
+        st.session_state.engine = GoPAESAdaptiveEngine(profile=prof)
+        st.session_state.nav_section = "DASHBOARD"
+        return True, msg
 
-def build_unit_exercise_queue_safe(
-    engine_inst: GoPAESAdaptiveEngine,
-    vector_store: GoPAESVectorStore,
-    exam: ExamType,
-    axis: ThematicAxis,
-    subtopic_keyword: str,
-    num_questions: int,
-    exclude_ids: list[str] | None = None,
-    micro_unit_id: str | None = None,
-) -> list[DEMREQuestionNode]:
-    """
-    Obtiene `num_questions` ejercicios pertenecientes exactamente a la Micro-Unidad (`micro_unit_id`).
-    """
-    if hasattr(engine_inst, "build_unit_exercise_queue"):
-        try:
-            return engine_inst.build_unit_exercise_queue(
-                vector_store=vector_store,
-                exam=exam,
-                axis=axis,
-                subtopic_keyword=subtopic_keyword,
-                num_questions=num_questions,
-                exclude_ids=exclude_ids,
-                micro_unit_id=micro_unit_id,
-            )
-        except TypeError:
-            return engine_inst.build_unit_exercise_queue(
-                vector_store=vector_store,
-                exam=exam,
-                axis=axis,
-                subtopic_keyword=subtopic_keyword,
-                num_questions=num_questions,
-                exclude_ids=exclude_ids,
-            )
+    # Respaldo local en caso de versión previa de adaptive_engine.py
+    creds = _load_credentials_store()
+    existing_key = next((k for k in creds.keys() if k.lower() == clean_user.lower()), None)
+    if existing_key is not None:
+        return False, f"El usuario '{existing_key}' ya está registrado. Ve a la pestaña 'Iniciar Sesión'."
 
-    excluded = set(exclude_ids or [])
-    combined: list[DEMREQuestionNode] = []
+    salt_hex = secrets.token_hex(16)
+    pwd_hash = _hash_pwd_local(password, salt_hex)
+    creds[clean_user] = {"salt": salt_hex, "hash": pwd_hash}
+    _save_credentials_store(creds)
 
-    if micro_unit_id and hasattr(vector_store, "query_by_micro_unit"):
-        for cand in (
-            vector_store.query_by_micro_unit(micro_unit_id, exam=exam, exclude_ids=list(excluded))
-            + vector_store.query_by_micro_unit(micro_unit_id, exam=exam, exclude_ids=[])
-        ):
-            if cand.node_id not in [c.node_id for c in combined]:
-                combined.append(cand)
-            if len(combined) >= num_questions:
-                return combined[:num_questions]
-
-    axis_pool: list[DEMREQuestionNode] = vector_store.query_by_axis_and_exam(
-        exam=exam,
-        axis=axis,
-        exclude_ids=[],
-        diagnostic_only=False,
-    )
-    kw = (subtopic_keyword or "").strip().lower()
-    primary = [
-        q for q in axis_pool
-        if (kw in q.subtopic_name.lower() or kw in q.stem_text.lower()) and q.node_id not in excluded
-    ]
-    secondary = [
-        q for q in axis_pool
-        if (kw in q.subtopic_name.lower() or kw in q.stem_text.lower()) and q.node_id in excluded
-    ]
-    for candidate in primary + secondary + axis_pool:
-        if candidate.node_id not in [c.node_id for c in combined]:
-            combined.append(candidate)
-        if len(combined) >= num_questions:
-            break
-    return combined[:num_questions]
-
-
-def login_with_profile(username: str):
-    profile = GoPAESProfileManager.load_or_create_profile(username)
-    st.session_state.active_username = profile.username
-    st.session_state.engine = GoPAESAdaptiveEngine(profile=profile)
+    prof = GoPAESProfileManager.load_or_create_profile(clean_user)
+    st.session_state.active_username = prof.username
+    st.session_state.engine = GoPAESAdaptiveEngine(profile=prof)
     st.session_state.nav_section = "DASHBOARD"
-    st.rerun()
+    return True, f"Cuenta creada exitosamente para {prof.username}."
+
+
+def authenticate_student_account(username: str, password: str) -> tuple[bool, str]:
+    clean_user = username.strip()
+    if not clean_user or not password:
+        return False, "Por favor ingresa tu nombre de usuario y tu contraseña."
+
+    if hasattr(GoPAESProfileManager, "authenticate_user"):
+        ok, msg, prof = GoPAESProfileManager.authenticate_user(clean_user, password)
+        if not ok or prof is None:
+            return False, msg
+        st.session_state.active_username = prof.username
+        st.session_state.engine = GoPAESAdaptiveEngine(profile=prof)
+        st.session_state.nav_section = "DASHBOARD"
+        return True, msg
+
+    creds = _load_credentials_store()
+    matched_key = next((k for k in creds.keys() if k.lower() == clean_user.lower()), None)
+    existing_profiles = GoPAESProfileManager.list_existing_profiles()
+    matched_prof_name = next((p for p in existing_profiles if p.lower() == clean_user.lower()), None)
+
+    if matched_key is None:
+        if matched_prof_name is not None:
+            # Perfil legado creado antes de activar contraseñas: le asignamos la contraseña actual
+            salt_hex = secrets.token_hex(16)
+            creds[matched_prof_name] = {
+                "salt": salt_hex,
+                "hash": _hash_pwd_local(password, salt_hex),
+            }
+            _save_credentials_store(creds)
+            prof = GoPAESProfileManager.load_or_create_profile(matched_prof_name)
+            st.session_state.active_username = prof.username
+            st.session_state.engine = GoPAESAdaptiveEngine(profile=prof)
+            st.session_state.nav_section = "DASHBOARD"
+            return True, f"Contraseña vinculada e inicio de sesión exitoso para {prof.username}."
+        return False, f"No existe una cuenta con el usuario '{clean_user}'. Regístrate en la pestaña 'Registrarse'."
+
+    entry = creds[matched_key]
+    cand_hash = _hash_pwd_local(password, entry["salt"])
+    if not hmac.compare_digest(entry["hash"], cand_hash):
+        return False, "❌ Contraseña incorrecta. Inténtalo de nuevo."
+
+    prof = GoPAESProfileManager.load_or_create_profile(matched_key)
+    st.session_state.active_username = prof.username
+    st.session_state.engine = GoPAESAdaptiveEngine(profile=prof)
+    st.session_state.nav_section = "DASHBOARD"
+    return True, f"Bienvenido nuevamente, {prof.username}."
 
 
 def logout_profile():
     st.session_state.active_username = None
+    st.session_state.selected_guide_axis = None
     st.rerun()
 
 
 # =====================================================================
-# PANTALLA DE INICIO / CREACIÓN DE PERFIL PERSISTENTE GOPAES
+# PANTALLA DE INICIO DE SESIÓN Y REGISTRO CON CONTRASEÑA
 # =====================================================================
 if not st.session_state.active_username:
-    st.title("🚀 Bienvenido a GoPAES • Preparación Adaptativa por Micro-Unidades DEMRE")
+    st.title("🚀 Bienvenido a GoPAES • Preparación Adaptativa PAES (M1 y M2)")
     st.markdown(
-        "Ingresa tu nombre para crear o cargar tu **Perfil Persistente de Estudiante**. "
-        "GoPAES rastrea tu dominio en las **20 Micro-Unidades oficiales del DEMRE (M1 y M2)** "
-        "para que tus prácticas y ensayos de debilidades ataquen exactamente los sub-temas que necesitas reforzar."
+        "Accede con tu **Usuario y Contraseña** para resguardar de forma privada tu progreso, "
+        "racha de estudio, ensayos completados y dominio en las **4 Unidades Oficiales DEMRE** "
+        "(**Números**, **Álgebra y Funciones**, **Geometría**, **Probabilidad y Estadística**)."
     )
 
-    col_new_user, col_existing = st.columns(2)
+    tab_login, tab_register = st.tabs([
+        "🔐 Iniciar Sesión (Ya tengo cuenta)",
+        "📝 Registrarse (Crear cuenta nueva)",
+    ])
 
-    with col_new_user:
+    with tab_login:
         with st.container(border=True):
-            st.subheader("✨ Crear o Ingresar a mi Perfil")
-            input_name = st.text_input(
-                "Nombre o Apodo del Estudiante:",
-                placeholder="Ej: Agustín, Camila, Matías...",
+            st.subheader("🔐 Iniciar Sesión en GoPAES")
+            st.caption("Ingresa tus credenciales para cargar tu perfil protegido:")
+            login_user = st.text_input(
+                "Nombre de Usuario:",
+                placeholder="Ej: agustin_paes",
+                key="login_username_input",
             )
-            if st.button("🚀 Entrar a GoPAES", type="primary", use_container_width=True):
-                if input_name.strip():
-                    login_with_profile(input_name.strip())
-                else:
-                    st.warning("Por favor escribe tu nombre para inicializar tu perfil.")
+            login_pwd = st.text_input(
+                "Contraseña:",
+                type="password",
+                placeholder="Ingresa tu contraseña",
+                key="login_password_input",
+            )
 
-    with col_existing:
+            if st.button("🔓 Iniciar Sesión", type="primary", use_container_width=True, key="btn_do_login"):
+                ok, msg = authenticate_student_account(login_user, login_pwd)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    with tab_register:
         with st.container(border=True):
-            st.subheader("📂 Perfiles Guardados en este Equipo")
-            existing_names = GoPAESProfileManager.list_existing_profiles()
-            if not existing_names:
-                st.caption("Aún no hay perfiles registrados. Crea el primero a la izquierda.")
-            else:
-                selected_existing = st.selectbox("Selecciona tu perfil guardado:", options=existing_names)
-                if st.button("🔓 Cargar Perfil Seleccionado", use_container_width=True):
-                    login_with_profile(selected_existing)
+            st.subheader("📝 Crear Nueva Cuenta de Estudiante")
+            st.caption(
+                "Registra tu usuario y una contraseña personal para que nadie más pueda modificar tus estadísticas ni tu historial."
+            )
+            reg_user = st.text_input(
+                "Elige un Nombre de Usuario:",
+                placeholder="Ej: agustin2026",
+                key="reg_username_input",
+            )
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                reg_pwd = st.text_input(
+                    "Crea tu Contraseña (mín. 4 caracteres):",
+                    type="password",
+                    key="reg_pwd_input",
+                )
+            with col_p2:
+                reg_pwd_confirm = st.text_input(
+                    "Confirma tu Contraseña:",
+                    type="password",
+                    key="reg_pwd_confirm_input",
+                )
+
+            if st.button("✨ Registrarme y Entrar a GoPAES", type="primary", use_container_width=True, key="btn_do_register"):
+                ok, msg = register_student_account(reg_user, reg_pwd, reg_pwd_confirm)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
     st.stop()
 
 
 # =====================================================================
-# BARRA LATERAL: NAVEGACIÓN + RADAR DE MICRO-UNIDADES EN VIVO
+# BARRA LATERAL: NAVEGACIÓN + MOTOR ADAPTATIVO EN LAS 4 UNIDADES
 # =====================================================================
 engine: GoPAESAdaptiveEngine = st.session_state.engine
 profile = engine.profile
 
+UNIT_ICONS: dict[ThematicAxis, str] = {
+    "NUMEROS": "🔢",
+    "ALGEBRA_Y_FUNCIONES": "📈",
+    "GEOMETRIA": "📐",
+    "PROBABILIDAD_Y_ESTADISTICA": "📊",
+}
+
+UNIT_NUMBER_LABELS: dict[ThematicAxis, str] = {
+    "NUMEROS": "Unidad 1: Números",
+    "ALGEBRA_Y_FUNCIONES": "Unidad 2: Álgebra y Funciones",
+    "GEOMETRIA": "Unidad 3: Geometría",
+    "PROBABILIDAD_Y_ESTADISTICA": "Unidad 4: Probabilidad y Estadística",
+}
+
 with st.sidebar:
     st.markdown(f"## 🚀 GoPAES • Hola, **{profile.username}**")
+    st.caption("🔒 Sesión protegida con contraseña")
     st.caption(
         f"🔥 Racha: **{profile.study_streak} día(s)** | "
         f"🏅 Ensayos: **{profile.completed_exams}** | "
         f"🎯 Precisión Neta: **{engine.global_net_accuracy}%**"
     )
-    st.caption(
-        f"🗄️ Banco Vectorial Qdrant: **{st.session_state.get('total_indexed_nodes', 228)} reactivos en 20 Micro-Unidades DEMRE**"
-    )
 
     st.markdown("### 🧭 Menú de Navegación")
     nav_labels = {
         "DASHBOARD": "👤 Perfil / Dashboard",
-        "DIAGNOSTIC": "🎯 Diagnóstico por Micro-Unidades",
+        "DIAGNOSTIC": "🎯 Diagnóstico",
         "EXAMS": "📝 Ensayos (Full y Debilidades)",
         "GUIDES_M1": "📘 Guías por Materia: PAES M1",
         "GUIDES_M2": "📕 Guías por Materia: PAES M2",
@@ -491,7 +356,7 @@ with st.sidebar:
     )
     if selected_nav != st.session_state.nav_section:
         st.session_state.nav_section = selected_nav
-        st.session_state.selected_guide_id = None
+        st.session_state.selected_guide_axis = None
         st.rerun()
 
     st.divider()
@@ -529,39 +394,28 @@ with st.sidebar:
                 else:
                     st.error(msg)
 
-    # PANEL DE TRANSPARENCIA DEL MOTOR ADAPTATIVO EN VIVO (EJES + TOP MICRO-UNIDADES DÉBILES)
-    st.markdown("### 🧠 Radar Adaptativo en Vivo")
+    # PANEL DE TRANSPARENCIA EN LAS 4 UNIDADES (IDÉNTICAS AL DASHBOARD Y LAS GUÍAS)
+    st.markdown("### 🧠 Dominio por Unidad")
     adaptive_probs = engine.compute_sampling_probabilities(mode="ADAPTIVE")
 
     rows = []
     for axis in ALL_AXES:
         st_axis = engine.axes_state[axis]
         rows.append({
-            "Eje": AXIS_LABELS[axis],
+            "Unidad": AXIS_LABELS[axis],
             "Dominio": f"{round(st_axis.mastery_score * 100)}%",
             "Peso IA": f"{round(adaptive_probs[axis] * 100, 1)}%",
             "Errores": st_axis.incorrect_count,
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # Mostrar las 3 micro-unidades específicas con mayor prioridad de refuerzo
-    mu_probs_m1 = get_micro_unit_probabilities_safe(engine, exam="M1", mode="ADAPTIVE")
-    if mu_probs_m1:
-        top_weak_uids = sorted(mu_probs_m1.keys(), key=lambda u: mu_probs_m1[u], reverse=True)[:3]
-        st.caption("🎯 **Micro-Unidades Prioritarias (Nicho a reforzar):**")
-        for uid in top_weak_uids:
-            u_name = CANONICAL_MICRO_UNITS.get(uid, {}).get("name", uid)
-            dom_u = get_micro_unit_mastery_pct(engine, uid)
-            prob_u = round(mu_probs_m1[uid] * 100, 1)
-            st.markdown(f"- **{u_name}**: Dominio `{dom_u}%` (Prioridad `{prob_u}%`)")
-
     st.divider()
     col_switch, col_wipe = st.columns(2)
     with col_switch:
-        if st.button("👤 Cambiar Usuario", use_container_width=True):
+        if st.button("🔒 Cerrar Sesión", use_container_width=True):
             logout_profile()
     with col_wipe:
-        if st.button("🗑️ Resetear Mi Perfil", use_container_width=True):
+        if st.button("🗑️ Resetear Progreso", use_container_width=True):
             fresh = GoPAESProfileManager.load_or_create_profile(profile.username)
             fresh.completed_exams = 0
             fresh.diagnostic_completed = False
@@ -577,20 +431,83 @@ with st.sidebar:
 
 
 # =====================================================================
-# COMPONENTES REUTILIZABLES: TARJETA DE PREGUNTA Y GUÍAS POR MICRO-UNIDAD
+# FUNCIONES DE CONSOLIDACIÓN DE LAS 4 GUÍAS POR UNIDAD (M1 Y M2)
 # =====================================================================
-def render_question_card(question: DEMREQuestionNode, step_num: int, total_steps: int, badge_text: str):
-    mu_id = getattr(question, "micro_unit_id", "NUM_CONJUNTOS")
-    mu_name = CANONICAL_MICRO_UNITS.get(mu_id, {}).get("name", question.subtopic_name)
+def get_consolidated_unit_guide(exam_target: ExamType, axis: ThematicAxis) -> DEMREExhaustiveGuide:
+    """
+    Garantiza que exista exactamente 1 Guía Maestra unificada para cada una de las
+    4 Unidades del Dashboard (Números, Álgebra y Funciones, Geometría, Probabilidad y Estadística),
+    consolidando todas las fórmulas, recetas y ejercicios prácticos si `guides_data.py` tenía sub-guías.
+    """
+    guides_by_axis = get_exhaustive_guides_by_exam(exam_target)
+    axis_list = guides_by_axis.get(axis, [])
+    if len(axis_list) == 1:
+        return axis_list[0]
 
-    col_badge, col_source = st.columns([2, 3])
+    # Si `guides_data.py` devuelve múltiples sub-guías en ese eje, fusionarlas en la Guía de la Unidad
+    base = axis_list[0]
+    all_formulas = []
+    all_recipes = []
+    all_traps = []
+    all_exercises = []
+    md_parts = []
+
+    for g in axis_list:
+        md_parts.append(g.theoretical_framework_md)
+        all_formulas.extend(g.key_formulas)
+        all_recipes.extend(g.resolution_recipe_steps)
+        all_traps.extend(g.common_demre_traps)
+        all_exercises.extend(g.interleaved_exercises)
+
+    return base.model_copy(
+        update={
+            "guide_id": f"GUIDE-{exam_target}-{axis}",
+            "unit_title": f"{UNIT_NUMBER_LABELS[axis]} (PAES {exam_target})",
+            "theoretical_framework_md": "\n\n---\n\n".join(md_parts),
+            "key_formulas": all_formulas,
+            "resolution_recipe_steps": all_recipes,
+            "common_demre_traps": all_traps,
+            "interleaved_exercises": all_exercises,
+        }
+    )
+
+
+def get_unit_questions_from_store(
+    vector_store: GoPAESVectorStore,
+    exam: ExamType,
+    axis: ThematicAxis,
+    num_questions: int,
+    exclude_ids: list[str] | None = None,
+) -> list[DEMREQuestionNode]:
+    """
+    Obtiene `num_questions` ejercicios de la base vectorial correspondientes a la Unidad (`axis`)
+    y prueba (`exam`) seleccionada.
+    """
+    excluded = set(exclude_ids or [])
+    unseen = vector_store.query_by_axis_and_exam(
+        exam=exam, axis=axis, exclude_ids=list(excluded), diagnostic_only=False
+    )
+    all_axis = vector_store.query_by_axis_and_exam(
+        exam=exam, axis=axis, exclude_ids=[], diagnostic_only=False
+    )
+    combined: list[DEMREQuestionNode] = []
+    for q in unseen + all_axis:
+        if q.node_id not in [c.node_id for c in combined]:
+            combined.append(q)
+        if len(combined) >= num_questions:
+            break
+    return combined[:num_questions]
+
+
+def render_question_card(question: DEMREQuestionNode, step_num: int, total_steps: int, badge_text: str):
+    col_badge, col_source = st.columns([2, 2])
     with col_badge:
         st.markdown(f"#### {badge_text} • Ejercicio {step_num} de {total_steps}")
     with col_source:
         st.markdown(
             f"<div style='text-align:right; color:#94a3b8; font-size:0.9rem;'>"
-            f"📌 <b>PAES {question.exam}</b> | Eje: <b>{AXIS_LABELS[question.thematic_axis]}</b><br>"
-            f"🎯 Micro-Unidad: <b>{mu_name}</b></div>",
+            f"📌 <b>PAES {question.exam}</b> | Unidad: <b>{AXIS_LABELS[question.thematic_axis]}</b> "
+            f"({question.subtopic_name})</div>",
             unsafe_allow_html=True,
         )
 
@@ -611,22 +528,19 @@ def render_question_card(question: DEMREQuestionNode, step_num: int, total_steps
             st.latex(opt.latex_content)
 
 
+# =====================================================================
+# RENDERIZADOR DE GUÍAS ALINEADO CON LAS 4 UNIDADES DEL DASHBOARD
+# =====================================================================
 def render_exhaustive_study_guides_section(exam_target: ExamType):
     """
-    Renderiza la sección de Guías por Materia (PAES M1 o PAES M2) estructurada en las
-    Micro-Unidades oficiales del DEMRE:
-    - Eje Números: Conjuntos Numéricos, Razones y Proporciones, Porcentajes.
-    - Eje Álgebra y Funciones: Expresiones Algebraicas, Ecuaciones e Inecuaciones de 1° Grado,
-      Sistemas de Ecuaciones (2x2), Función Lineal y Afín, Función Cuadrática.
-    - Eje Geometría: Perímetro y Área de Figuras 2D, Cuerpos Geométricos 3D,
-      Transformaciones Isométricas, Teorema de Pitágoras, Semejanza y Proporcionalidad,
-      Homotecia (solo M2), Razones Trigonométricas (solo M2).
-    - Eje Probabilidad y Estadística: Representación de Datos (Tablas y Gráficos),
-      Medidas de Tendencia Central, Medidas de Posición (Cuartiles/Percentiles),
-      Reglas de Probabilidad, Técnicas de Conteo/Combinatoria (solo M2).
-
-    Cada ejercicio práctico dentro de la guía incluye un botón interactivo "✅ Comprobar respuesta"
-    con validación inmediata y explicación paso a paso en LaTeX sin salir del modo de estudio.
+    Renderiza las Guías por Materia organizadas exactamente en las mismas 4 Unidades
+    del Dashboard:
+      1. Números
+      2. Álgebra y Funciones
+      3. Geometría
+      4. Probabilidad y Estadística
+    Con un Menú Intermedio de las 4 Unidades y botón interactivo '✅ Comprobar respuesta'
+    en cada ejercicio práctico dentro de la guía.
     """
     badge_color = "#1d4ed8" if exam_target == "M1" else "#9333ea"
     exam_title = (
@@ -637,170 +551,126 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
 
     col_head, col_switch_exam = st.columns([3, 1])
     with col_head:
-        st.title(f"{'📘' if exam_target == 'M1' else '📕'} Guías por Micro-Unidad DEMRE • {exam_title}")
+        st.title(f"{'📘' if exam_target == 'M1' else '📕'} Guías por Unidad • {exam_title}")
     with col_switch_exam:
         other_exam = "M2" if exam_target == "M1" else "M1"
         if st.button(f"🔄 Cambiar a Guías PAES {other_exam}", use_container_width=True):
             st.session_state.nav_section = f"GUIDES_{other_exam}"
-            st.session_state.selected_guide_id = None
+            st.session_state.selected_guide_axis = None
             st.rerun()
 
-    guides_by_axis = get_exhaustive_guides_by_exam(exam_target)
-
-    # Buscar si hay una guía actualmente seleccionada para este examen
-    active_guide: DEMREExhaustiveGuide | None = None
-    if st.session_state.selected_guide_id:
-        for ax_list in guides_by_axis.values():
-            for g in ax_list:
-                if g.guide_id == st.session_state.selected_guide_id and g.exam == exam_target:
-                    active_guide = g
-                    break
-
     # =========================================================================
-    # NIVEL 1: MENÚ INTERMEDIO DE MICRO-UNIDADES DEMRE
+    # NIVEL 1: MENÚ INTERMEDIO DE LAS 4 UNIDADES (IDÉNTICAS AL DASHBOARD)
     # =========================================================================
-    if active_guide is None:
+    if st.session_state.selected_guide_axis is None:
         st.markdown(
-            "Selecciona un **Eje Temático** para explorar sus **Micro-Unidades específicas del temario DEMRE**. "
-            "Dentro de cada guía podrás estudiar la teoría, seguir la receta paso a paso y usar el botón "
-            "**`✅ Comprobar respuesta`** en cada ejercicio práctico sin salir de la guía."
+            "Las guías están organizadas exactamente en las **4 Unidades Oficiales** de tu Dashboard "
+            "(**Números**, **Álgebra y Funciones**, **Geometría**, **Probabilidad y Estadística**). "
+            "Elige qué unidad deseas estudiar y cuántos ejercicios quieres desarrollar:"
         )
 
-        selected_axis: ThematicAxis = st.selectbox(
-            f"1️⃣ Selecciona el Eje Temático de PAES {exam_target}:",
-            options=ALL_AXES,
-            format_func=lambda a: (
-                f"📐 {AXIS_LABELS[a]} — {len(guides_by_axis.get(a, []))} Micro-Unidades DEMRE "
-                f"(Dominio del eje: {round(engine.axes_state[a].mastery_score * 100)}%)"
-            ),
-            key=f"select_axis_guide_{exam_target}",
-        )
+        adaptive_probs = engine.compute_sampling_probabilities(mode="ADAPTIVE")
 
-        axis_guides: list[DEMREExhaustiveGuide] = guides_by_axis.get(selected_axis, [])
-        st.markdown(
-            f"### 🗂️ 2️⃣ Micro-Unidades de **{AXIS_LABELS[selected_axis]} ({exam_target})**"
-        )
-        st.caption(
-            "Elige qué micro-unidad quieres desarrollar y cuántos ejercicios prácticos quieres incluir en tu sesión de estudio:"
-        )
+        # Mostrar las 4 Unidades en una cuadrícula 2x2 limpia y ordenada
+        col_u1, col_u2 = st.columns(2)
+        grid_cols = [col_u1, col_u2, col_u1, col_u2]
 
-        for idx_g, guide in enumerate(axis_guides, start=1):
-            short_desc = _get_guide_short_desc(guide)
-            subtopic_kw = _get_guide_subtopic_kw(guide)
-            mu_id = get_guide_micro_unit_id(guide)
-            mu_dom = get_micro_unit_mastery_pct(engine, mu_id)
+        for idx_axis, axis in enumerate(ALL_AXES):
+            guide = get_consolidated_unit_guide(exam_target, axis)
+            st_axis = engine.axes_state[axis]
+            dom_pct = round(st_axis.mastery_score * 100, 1)
+            weight_pct = round(adaptive_probs[axis] * 100, 1)
 
-            with st.container(border=True):
-                col_info, col_actions = st.columns([3, 2])
-
-                with col_info:
+            with grid_cols[idx_axis]:
+                with st.container(border=True):
                     st.markdown(
-                        f"<div style='display:flex; align-items:center; gap:10px; flex-wrap:wrap;'>"
-                        f"<span style='background:{badge_color}; color:white; padding:3px 10px; border-radius:99px; font-size:0.8rem; font-weight:bold;'>"
-                        f"Micro-Unidad #{idx_g} • {guide.exam}</span>"
-                        f"<span style='background:#0f172a; color:#38bdf8; border:1px solid #38bdf8; padding:2px 10px; border-radius:99px; font-size:0.8rem;'>"
-                        f"Tu Dominio: {mu_dom}%</span>"
-                        f"<h4 style='margin:0;'>{guide.unit_title}</h4>"
-                        f"</div>",
+                        f"<div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;'>"
+                        f"<h3 style='margin:0;'>{UNIT_ICONS[axis]} {UNIT_NUMBER_LABELS[axis]}</h3>"
+                        f"<span style='background:{badge_color}; color:white; padding:3px 12px; border-radius:99px; font-size:0.8rem; font-weight:bold;'>"
+                        f"PAES {exam_target}</span></div>",
                         unsafe_allow_html=True,
                     )
                     st.caption(f"📌 {guide.demre_syllabus_reference}")
+
+                    # Barra de dominio sincronizada con el Dashboard
+                    st.markdown(
+                        f"**Tu Dominio en {AXIS_LABELS[axis]}:** `{dom_pct}%` | "
+                        f"**Precisión Neta:** `{st_axis.net_accuracy}%` | "
+                        f"**Prioridad IA:** `{weight_pct}%`"
+                    )
+                    st.progress(min(1.0, st_axis.mastery_score))
+
+                    short_desc = getattr(guide, "short_description", "") or (
+                        f"Marco teórico completo, fórmulas en LaTeX, receta de resolución y ejercicios prácticos de {AXIS_LABELS[axis]}."
+                    )
                     st.write(short_desc)
+
                     st.markdown(
                         f"🧮 **{len(guide.key_formulas)}** Fórmulas $\\text{{LaTeX}}$ | "
                         f"🧑‍🍳 **{len(guide.resolution_recipe_steps)}** Pasos de Receta | "
-                        f"✍️ **Ejercicios con Comprobación Inmediata**"
+                        f"✍️ **Ejercicios con 'Comprobar respuesta'**"
                     )
 
-                with col_actions:
-                    c_num, c_btn = st.columns([1, 2])
+                    st.divider()
+                    c_num, c_open = st.columns([1, 2])
                     with c_num:
-                        num_ex_menu = st.number_input(
+                        num_ex_unit = st.number_input(
                             "N° Ejercicios:",
                             min_value=1,
                             max_value=20,
                             value=5,
                             step=1,
-                            key=f"menu_num_ex_{guide.guide_id}",
+                            key=f"menu_num_{exam_target}_{axis}",
                         )
-                    with c_btn:
+                    with c_open:
                         st.write("")
                         if st.button(
-                            f"📖 Abrir Guía + {num_ex_menu} Ejercicios",
+                            f"📖 Abrir Guía de {AXIS_LABELS[axis]} ({num_ex_unit} ejercicios)",
                             type="primary",
                             use_container_width=True,
-                            key=f"btn_open_guide_{guide.guide_id}",
+                            key=f"btn_open_unit_{exam_target}_{axis}",
                         ):
-                            st.session_state.selected_guide_id = guide.guide_id
-                            st.session_state.unit_custom_workouts[guide.guide_id] = build_unit_exercise_queue_safe(
-                                engine_inst=engine,
+                            st.session_state.selected_guide_axis = axis
+                            workout_key = f"{exam_target}_{axis}"
+                            st.session_state.unit_custom_workouts[workout_key] = get_unit_questions_from_store(
                                 vector_store=st.session_state.vector_store,
-                                exam=guide.exam,
-                                axis=guide.thematic_axis,
-                                subtopic_keyword=subtopic_kw,
-                                num_questions=int(num_ex_menu),
+                                exam=exam_target,
+                                axis=axis,
+                                num_questions=int(num_ex_unit),
                                 exclude_ids=st.session_state.asked_ids,
-                                micro_unit_id=mu_id,
                             )
                             st.rerun()
-
-                    if st.button(
-                        f"🎯 Ensayo Focalizado en '{guide.unit_title}' ({num_ex_menu} preg.)",
-                        use_container_width=True,
-                        key=f"btn_focus_exam_{guide.guide_id}",
-                    ):
-                        queue_mu = build_unit_exercise_queue_safe(
-                            engine_inst=engine,
-                            vector_store=st.session_state.vector_store,
-                            exam=guide.exam,
-                            axis=guide.thematic_axis,
-                            subtopic_keyword=subtopic_kw,
-                            num_questions=int(num_ex_menu),
-                            exclude_ids=st.session_state.asked_ids,
-                            micro_unit_id=mu_id,
-                        )
-                        st.session_state.exam_config = {
-                            "exam": guide.exam,
-                            "num_questions": len(queue_mu),
-                            "timed_mode": False,
-                            "allocated_seconds": len(queue_mu) * OFFICIAL_SECONDS_PER_QUESTION[guide.exam],
-                            "selection_mode": "ADAPTIVE",
-                            "focus_micro_unit_id": mu_id,
-                        }
-                        st.session_state.exam_queue = queue_mu
-                        st.session_state.exam_history = []
-                        st.session_state.exam_subphase = "ACTIVE_RUN"
-                        st.session_state.nav_section = "EXAMS"
-                        st.rerun()
         return
 
     # =========================================================================
-    # NIVEL 2: GUÍA DE LA MICRO-UNIDAD CON "COMPROBAR RESPUESTA" EN CADA EJERCICIO
+    # NIVEL 2: VISTA COMPLETA DE LA UNIDAD SELECCIONADA + "COMPROBAR RESPUESTA"
     # =========================================================================
-    active_subtopic_kw = _get_guide_subtopic_kw(active_guide)
-    active_mu_id = get_guide_micro_unit_id(active_guide)
-    active_mu_dom = get_micro_unit_mastery_pct(engine, active_mu_id)
+    active_axis: ThematicAxis = st.session_state.selected_guide_axis
+    active_guide = get_consolidated_unit_guide(exam_target, active_axis)
+    st_axis_active = engine.axes_state[active_axis]
+    dom_active = round(st_axis_active.mastery_score * 100, 1)
+    workout_key = f"{exam_target}_{active_axis}"
 
     col_back, col_unit_badge = st.columns([1, 3])
     with col_back:
-        if st.button("⬅️ Volver al Menú de Micro-Unidades", use_container_width=True):
-            st.session_state.selected_guide_id = None
+        if st.button("⬅️ Volver a las 4 Unidades", use_container_width=True):
+            st.session_state.selected_guide_axis = None
             st.rerun()
     with col_unit_badge:
         st.markdown(
             f"<div style='text-align:right;'>"
             f"<span style='background:{badge_color}; color:white; padding:5px 14px; border-radius:99px; font-size:0.88rem; font-weight:bold;'>"
-            f"{AXIS_LABELS[active_guide.thematic_axis]} • {active_guide.exam}</span> "
+            f"{UNIT_NUMBER_LABELS[active_axis]} • PAES {exam_target}</span> "
             f"<span style='background:#0f172a; color:#38bdf8; border:1px solid #38bdf8; padding:5px 14px; border-radius:99px; font-size:0.88rem; font-weight:bold;'>"
-            f"Dominio en esta Micro-Unidad: {active_mu_dom}%</span></div>",
+            f"Tu Dominio en {AXIS_LABELS[active_axis]}: {dom_active}%</span></div>",
             unsafe_allow_html=True,
         )
 
-    st.header(f"📘 {active_guide.unit_title}")
+    st.header(f"{UNIT_ICONS[active_axis]} {active_guide.unit_title}")
     st.caption(f"📌 {active_guide.demre_syllabus_reference}")
 
     # -----------------------------------------------------------------
-    # BLOQUE A: MARCO TEÓRICO, FORMULARIO LATEX, RECETA Y TRAMPAS DEMRE
+    # PARTE 1: MARCO TEÓRICO, FORMULARIO LATEX, RECETA Y TRAMPAS DEMRE
     # -----------------------------------------------------------------
     with st.container(border=True):
         st.markdown(active_guide.theoretical_framework_md)
@@ -816,23 +686,27 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
         st.divider()
 
         st.markdown(f"#### 🧑‍🍳 {active_guide.resolution_recipe_title}")
-        st.info("Aplica este algoritmo paso a paso para resolver los problemas de esta micro-unidad:")
+        st.info(
+            f"Sigue este algoritmo paso a paso para resolver los problemas de **{AXIS_LABELS[active_axis]}**:"
+        )
         for recipe_step in active_guide.resolution_recipe_steps:
             st.markdown(f"- ✅ **{recipe_step}**")
 
         st.divider()
 
-        st.markdown("#### ⚠️ Trampas y Distractores Frecuentes del DEMRE")
+        st.markdown("#### ⚠️ Trampas y Errores Frecuentes del DEMRE a Evitar")
         for trap in active_guide.common_demre_traps:
             st.warning(f"🔎 {trap}")
 
+    st.divider()
+
     # -----------------------------------------------------------------
-    # BLOQUE B: EJERCICIOS GUIADOS CON BOTÓN "COMPROBAR RESPUESTA" IN-PLACE
+    # PARTE 2: EJERCICIOS GUIADOS CON BOTÓN "COMPROBAR RESPUESTA"
     # -----------------------------------------------------------------
-    st.markdown("### ✍️ Parte 1: Ejercicios Guiados de la Micro-Unidad (Validación Inmediata)")
+    st.markdown(f"### ✍️ Ejercicios Guiados de {AXIS_LABELS[active_axis]} (Con Comprobación Inmediata)")
     st.caption(
-        "Selecciona una alternativa y presiona **`✅ Comprobar respuesta`** para verificar tu resultado "
-        "y desplegar la explicación paso a paso sin salir de la guía."
+        "Selecciona tu alternativa y presiona **`✅ Comprobar respuesta`** debajo de cada ejercicio "
+        "para validar tu resultado y ver la explicación paso a paso sin salir de la guía."
     )
 
     for ex in active_guide.interleaved_exercises:
@@ -849,7 +723,7 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                     st.latex(opt_latex)
 
             chosen_ex_opt = st.radio(
-                "Selecciona tu respuesta para este ejercicio:",
+                "Selecciona tu respuesta:",
                 options=list(ex.options.keys()),
                 format_func=lambda k: f"Alternativa {k}",
                 horizontal=True,
@@ -870,7 +744,7 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                     st.success(f"🎉 **¡Respuesta Correcta! La alternativa oficial es la {ex.correct_option}).**")
                 else:
                     st.error(
-                        f"❌ **Respuesta Incorrecta.** Marcaste la alternativa **{user_ans})**, "
+                        f"❌ **Respuesta Incorrecta.** Marcaste **{user_ans})**, "
                         f"pero la alternativa correcta es la **{ex.correct_option})**."
                     )
                 st.markdown("#### 📘 Explicación Paso a Paso:")
@@ -880,86 +754,80 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
     st.divider()
 
     # -----------------------------------------------------------------
-    # BLOQUE C: PRÁCTICA PERSONALIZADA DE LA MICRO-UNIDAD CON "COMPROBAR RESPUESTA"
+    # PARTE 3: BATERÍA PERSONALIZABLE DE EJERCICIOS DE LA UNIDAD
     # -----------------------------------------------------------------
-    st.markdown(f"### 🏋️ Parte 2: Ejercicios Prácticos de **{active_guide.unit_title}** (Elige la Cantidad)")
+    st.markdown(
+        f"### 🏋️ Práctica de Ejercicios de **{AXIS_LABELS[active_axis]}** (Elige cuántos realizar)"
+    )
     with st.container(border=True):
         st.write(
-            "Elige cuántos ejercicios de esta micro-unidad deseas resolver aquí mismo. "
-            "Cada ejercicio cuenta con su botón **`✅ Comprobar respuesta`** para entregarte validación inmediata, "
-            "explicación paso a paso en $\\text{LaTeX}$ y actualizar tu dominio en esta micro-unidad sin abandonar el modo estudio."
+            f"Elige la cantidad de ejercicios de la unidad **{AXIS_LABELS[active_axis]} ({exam_target})** "
+            "que deseas desarrollar aquí mismo. Cada ejercicio tiene su botón **`✅ Comprobar respuesta`** "
+            "con resolución paso a paso en $\\text{LaTeX}$ y actualiza tu barra de dominio en el Dashboard."
         )
 
-        current_list: list[DEMREQuestionNode] = st.session_state.unit_custom_workouts.get(
-            active_guide.guide_id, []
-        )
+        current_list: list[DEMREQuestionNode] = st.session_state.unit_custom_workouts.get(workout_key, [])
         default_qty = len(current_list) if current_list else 5
 
         col_slider, col_btn_load = st.columns([3, 2])
         with col_slider:
             desired_qty = st.slider(
-                "Cantidad de ejercicios a desarrollar de esta micro-unidad:",
+                f"Cantidad de ejercicios para practicar en {AXIS_LABELS[active_axis]}:",
                 min_value=1,
-                max_value=15,
-                value=min(15, default_qty),
-                key=f"unit_qty_slider_{active_guide.guide_id}",
+                max_value=20,
+                value=min(20, default_qty),
+                key=f"unit_qty_slider_{workout_key}",
             )
         with col_btn_load:
             st.write("")
             if st.button(
-                f"🔄 Generar {desired_qty} Ejercicios de esta Micro-Unidad",
+                f"🔄 Cargar {desired_qty} Ejercicios de {AXIS_LABELS[active_axis]}",
                 type="primary",
                 use_container_width=True,
-                key=f"btn_reload_inline_{active_guide.guide_id}",
+                key=f"btn_reload_inline_{workout_key}",
             ):
-                st.session_state.unit_custom_workouts[active_guide.guide_id] = build_unit_exercise_queue_safe(
-                    engine_inst=engine,
+                st.session_state.unit_custom_workouts[workout_key] = get_unit_questions_from_store(
                     vector_store=st.session_state.vector_store,
-                    exam=active_guide.exam,
-                    axis=active_guide.thematic_axis,
-                    subtopic_keyword=active_subtopic_kw,
+                    exam=exam_target,
+                    axis=active_axis,
                     num_questions=int(desired_qty),
                     exclude_ids=st.session_state.asked_ids,
-                    micro_unit_id=active_mu_id,
                 )
                 st.rerun()
 
-    if active_guide.guide_id not in st.session_state.unit_custom_workouts:
-        st.session_state.unit_custom_workouts[active_guide.guide_id] = build_unit_exercise_queue_safe(
-            engine_inst=engine,
+    if workout_key not in st.session_state.unit_custom_workouts:
+        st.session_state.unit_custom_workouts[workout_key] = get_unit_questions_from_store(
             vector_store=st.session_state.vector_store,
-            exam=active_guide.exam,
-            axis=active_guide.thematic_axis,
-            subtopic_keyword=active_subtopic_kw,
+            exam=exam_target,
+            axis=active_axis,
             num_questions=int(desired_qty),
             exclude_ids=st.session_state.asked_ids,
-            micro_unit_id=active_mu_id,
         )
 
-    workout_questions: list[DEMREQuestionNode] = st.session_state.unit_custom_workouts[active_guide.guide_id]
+    workout_questions: list[DEMREQuestionNode] = st.session_state.unit_custom_workouts[workout_key]
 
     answered_in_unit = sum(
         1
         for q_node in workout_questions
-        if f"{active_guide.guide_id}_{q_node.node_id}" in st.session_state.unit_workout_answers
+        if f"{workout_key}_{q_node.node_id}" in st.session_state.unit_workout_answers
     )
     st.progress(
         answered_in_unit / max(1, len(workout_questions)),
-        text=f"Progreso en '{active_guide.unit_title}': {answered_in_unit} de {len(workout_questions)} ejercicio(s) comprobado(s)",
+        text=f"Progreso en la unidad {AXIS_LABELS[active_axis]}: {answered_in_unit} de {len(workout_questions)} ejercicio(s) comprobado(s)",
     )
 
     for q_idx, q_node in enumerate(workout_questions, start=1):
-        ans_key = f"{active_guide.guide_id}_{q_node.node_id}"
+        ans_key = f"{workout_key}_{q_node.node_id}"
         with st.container(border=True):
             render_question_card(
                 question=q_node,
                 step_num=q_idx,
                 total_steps=len(workout_questions),
-                badge_text=f"🏋️ Ejercicio de Micro-Unidad ({active_guide.exam})",
+                badge_text=f"🏋️ Práctica de {AXIS_LABELS[active_axis]} ({exam_target})",
             )
 
             chosen_unit_opt = st.radio(
-                "Selecciona tu alternativa:",
+                "Selecciona tu respuesta:",
                 options=[o.key for o in q_node.options],
                 format_func=lambda k: f"Alternativa {k}",
                 horizontal=True,
@@ -977,7 +845,7 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                     state_res = engine.process_response(
                         question=q_node,
                         selected_option=chosen_unit_opt,
-                        phase_label=f"Guía {active_guide.unit_title}",
+                        phase_label=f"Guía {AXIS_LABELS[active_axis]}",
                     )
                     st.session_state.asked_ids.append(q_node.node_id)
                     st.session_state.unit_workout_answers[ans_key] = {
@@ -995,7 +863,7 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                     state_res = engine.process_response(
                         question=q_node,
                         selected_option="OMIT",
-                        phase_label=f"Guía {active_guide.unit_title}",
+                        phase_label=f"Guía {AXIS_LABELS[active_axis]}",
                     )
                     st.session_state.asked_ids.append(q_node.node_id)
                     st.session_state.unit_workout_answers[ans_key] = {
@@ -1011,20 +879,20 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
                 ai_cache_key = f"unit_{ans_key}_{u_sel}_{u_state}"
 
                 st.divider()
+                new_dom_pct = round(engine.axes_state[active_axis].mastery_score * 100, 1)
                 if u_state == "CORRECT":
                     st.success(
-                        f"🎉 **¡Respuesta Correcta!** Marcaste la alternativa **{u_sel})**, que coincide con la pauta oficial DEMRE. "
-                        f"Tu dominio en **{active_guide.unit_title}** ha subido a **{get_micro_unit_mastery_pct(engine, active_mu_id)}%**."
+                        f"🎉 **¡Respuesta Correcta!** Marcaste la alternativa **{u_sel})**. "
+                        f"Tu dominio en la unidad **{AXIS_LABELS[active_axis]}** ahora es **{new_dom_pct}%**."
                     )
                 elif u_state == "OMITTED":
                     st.warning(
-                        f"🏳️ **Ejercicio omitido (Vacío de Conocimiento registrado en '{active_guide.unit_title}').** "
+                        f"🏳️ **Ejercicio omitido (Vacío de Conocimiento registrado en {AXIS_LABELS[active_axis]}).** "
                         f"La alternativa correcta según el DEMRE es la **{q_node.correct_option})**."
                     )
                 else:
                     st.error(
-                        f"❌ **Respuesta Incorrecta.** Marcaste **{u_sel})**, pero la alternativa correcta es la **{q_node.correct_option})**. "
-                        f"El motor adaptativo reforzará **{active_guide.unit_title}** en tus próximos ensayos."
+                        f"❌ **Respuesta Incorrecta.** Marcaste **{u_sel})**, pero la alternativa correcta es la **{q_node.correct_option})**."
                     )
 
                 if ai_cache_key not in st.session_state.ai_explanations_cache:
@@ -1042,14 +910,13 @@ def render_exhaustive_study_guides_section(exam_target: ExamType):
 
 
 # =====================================================================
-# SECCIÓN 1: PERFIL / DASHBOARD CON RADAR DE MICRO-UNIDADES DEMRE
+# SECCIÓN 1: PERFIL / DASHBOARD (4 UNIDADES SINCRONIZADAS CON LAS GUÍAS)
 # =====================================================================
 if st.session_state.nav_section == "DASHBOARD":
     st.title(f"👤 Dashboard de Rendimiento • {profile.username}")
     st.caption(
-        "Seguimiento granular por **Ejes Temáticos** y **Micro-Unidades DEMRE (M1 y M2)**. "
-        "El algoritmo adaptativo detecta tus nichos específicos de error (ej. *Función Cuadrática* o *Medidas de Posición*) "
-        "para personalizar tus ensayos de debilidades."
+        "Tu progreso está resguardado bajo tu cuenta personal y organizado en las **4 Unidades Oficiales DEMRE** "
+        "(**Números**, **Álgebra y Funciones**, **Geometría**, **Probabilidad y Estadística**)."
     )
 
     k1, k2, k3, k4 = st.columns(4)
@@ -1064,118 +931,102 @@ if st.session_state.nav_section == "DASHBOARD":
 
     with col_left:
         with st.container(border=True):
-            st.subheader("📊 Dominio Global por Eje Temático DEMRE")
+            st.subheader("📊 Dominio y Acceso Directo a las 4 Unidades DEMRE")
             adaptive_probs = engine.compute_sampling_probabilities(mode="ADAPTIVE")
 
             for axis in ALL_AXES:
                 st_axis = engine.axes_state[axis]
                 dom_pct = round(st_axis.mastery_score * 100, 1)
                 prob_pct = round(adaptive_probs[axis] * 100, 1)
-                st.markdown(
-                    f"**{AXIS_LABELS[axis]}** — Dominio: `{dom_pct}%` | "
-                    f"Precisión Neta: `{st_axis.net_accuracy}%` | "
-                    f"Peso del Eje: **{prob_pct}%**"
-                )
-                st.progress(min(1.0, st_axis.mastery_score))
+
+                c_bar, c_btn_m1, c_btn_m2 = st.columns([4, 1, 1])
+                with c_bar:
+                    st.markdown(
+                        f"**{UNIT_ICONS[axis]} {UNIT_NUMBER_LABELS[axis]}** — Dominio: `{dom_pct}%` | "
+                        f"Precisión Neta: `{st_axis.net_accuracy}%` | "
+                        f"Prioridad IA: **{prob_pct}%**"
+                    )
+                    st.progress(min(1.0, st_axis.mastery_score))
+                with c_btn_m1:
+                    st.write("")
+                    if st.button("📘 Guía M1", key=f"dash_gm1_{axis}", use_container_width=True):
+                        st.session_state.selected_guide_axis = axis
+                        st.session_state.nav_section = "GUIDES_M1"
+                        st.rerun()
+                with c_btn_m2:
+                    st.write("")
+                    if st.button("📕 Guía M2", key=f"dash_gm2_{axis}", use_container_width=True):
+                        st.session_state.selected_guide_axis = axis
+                        st.session_state.nav_section = "GUIDES_M2"
+                        st.rerun()
 
     with col_right:
         with st.container(border=True):
             st.subheader("🚀 Acciones Rápidas de Estudio")
             if not profile.diagnostic_completed:
-                st.warning("🎯 **Diagnóstico Pendiente:** Realiza las 4 preguntas ancla para calibrar tu perfil inicial.")
+                st.warning("🎯 **Diagnóstico Pendiente:** Realiza las preguntas de calibración para personalizar tus 4 unidades.")
             else:
                 st.success("✅ **Diagnóstico Inicial Calibrado**")
 
-            if st.button("🎯 Ir al Diagnóstico por Micro-Unidades", use_container_width=True):
+            if st.button("🎯 Ir al Diagnóstico de Calibración", use_container_width=True):
                 st.session_state.diag_idx = 0
                 st.session_state.nav_section = "DIAGNOSTIC"
                 st.rerun()
 
-            if st.button("🔥 Iniciar Ensayo de Debilidades (Ataca tus Micro-Unidades Débiles)", type="primary", use_container_width=True):
+            if st.button("🔥 Iniciar Ensayo de Debilidades (Adaptativo)", type="primary", use_container_width=True):
                 st.session_state.exam_config["selection_mode"] = "ADAPTIVE"
-                st.session_state.exam_config["focus_micro_unit_id"] = None
                 st.session_state.exam_subphase = "CONFIG"
                 st.session_state.nav_section = "EXAMS"
                 st.rerun()
 
             if st.button("🏛️ Ir a Ensayo Full Oficial PAES (65 Preguntas)", use_container_width=True):
                 st.session_state.exam_config["selection_mode"] = "OFFICIAL_65"
-                st.session_state.exam_config["focus_micro_unit_id"] = None
                 st.session_state.exam_subphase = "CONFIG"
                 st.session_state.nav_section = "EXAMS"
                 st.rerun()
 
             c_g1, c_g2 = st.columns(2)
             with c_g1:
-                if st.button("📘 Guías PAES M1", use_container_width=True):
-                    st.session_state.selected_guide_id = None
+                if st.button("📘 Menú Guías PAES M1", use_container_width=True):
+                    st.session_state.selected_guide_axis = None
                     st.session_state.nav_section = "GUIDES_M1"
                     st.rerun()
             with c_g2:
-                if st.button("📕 Guías PAES M2", use_container_width=True):
-                    st.session_state.selected_guide_id = None
+                if st.button("📕 Menú Guías PAES M2", use_container_width=True):
+                    st.session_state.selected_guide_axis = None
                     st.session_state.nav_section = "GUIDES_M2"
                     st.rerun()
 
-    # DESGLOSE COMPLETO DE LAS 20 MICRO-UNIDADES DEMRE
     with st.container(border=True):
-        st.subheader("🎯 Mapa Granular de Micro-Unidades DEMRE (Detección de Nichos de Debilidad)")
-        st.caption(
-            "Aquí puedes ver tu dominio y prioridad de refuerzo en cada sub-tema específico del temario oficial:"
-        )
-        mu_probs_all = get_micro_unit_probabilities_safe(engine, exam="M2", mode="ADAPTIVE")
-        mu_rows = []
-        for uid, meta in CANONICAL_MICRO_UNITS.items():
-            u_obj = getattr(engine, "micro_units_state", {}).get(uid)
-            dom_val = get_micro_unit_mastery_pct(engine, uid)
-            err_cnt = u_obj.incorrect_count if u_obj else 0
-            omit_cnt = u_obj.omitted_count if u_obj else 0
-            ok_cnt = u_obj.correct_count if u_obj else 0
-            prob_val = round(mu_probs_all.get(uid, 0.05) * 100, 1)
-            mu_rows.append({
-                "Eje Temático": AXIS_LABELS[meta["axis"]],
-                "Micro-Unidad DEMRE": meta["name"],
-                "Pruebas": " / ".join(meta["exams"]),
-                "Dominio": f"{dom_val}%",
-                "Prioridad IA": f"{prob_val}%",
-                "Correctas": ok_cnt,
-                "Errores": err_cnt,
-                "Omitidas": omit_cnt,
-            })
-        st.dataframe(pd.DataFrame(mu_rows), use_container_width=True, hide_index=True)
-
-    with st.container(border=True):
-        st.subheader("📜 Historial Reciente del Motor Adaptativo (Por Micro-Unidad)")
+        st.subheader("📜 Últimos Movimientos del Motor Adaptativo en tu Cuenta")
         if not engine.logs:
-            st.info("Aún no registras respuestas en este perfil. Comienza por el Diagnóstico, una Guía o un Ensayo.")
+            st.info("Aún no registras respuestas en esta cuenta. Comienza por el Diagnóstico, una Guía o un Ensayo.")
         else:
             for log in engine.logs[:6]:
                 delta_str = f"+{log.delta_mastery}%" if log.delta_mastery >= 0 else f"{log.delta_mastery}%"
-                u_label = getattr(log, "micro_unit_name", "") or AXIS_LABELS[log.axis]
                 st.markdown(
-                    f"- **{log.step_label}** ({AXIS_LABELS[log.axis]} • *{u_label}*): "
-                    f"Dominio `{log.old_mastery}%` → `{log.new_mastery}%` (`{delta_str}`) — {log.explanation}"
+                    f"- **{log.step_label}** ({AXIS_LABELS[log.axis]}): Dominio `{log.old_mastery}%` → `{log.new_mastery}%` (`{delta_str}`) — {log.explanation}"
                 )
 
 
 # =====================================================================
-# SECCIÓN 2: DIAGNÓSTICO DE CALIBRACIÓN POR MICRO-UNIDADES
+# SECCIÓN 2: DIAGNÓSTICO DE CALIBRACIÓN EN LAS 4 UNIDADES
 # =====================================================================
 elif st.session_state.nav_section == "DIAGNOSTIC":
-    st.title("🎯 Diagnóstico de Calibración por Micro-Unidades DEMRE")
+    st.title("🎯 Diagnóstico de Calibración en las 4 Unidades GoPAES")
     st.write(
-        "Responde estas preguntas ancla del DEMRE o usa **'Dejar en blanco'** para que GoPAES "
-        "identifique tus brechas iniciales por micro-unidad sin penalizar tu precisión por azar."
+        "Responde estas preguntas ancla del DEMRE (una por cada unidad: **Números**, **Álgebra y Funciones**, "
+        "**Geometría** y **Probabilidad y Estadística**) o usa **'Dejar en blanco'** para calibrar tu perfil."
     )
 
     diag_qs: list[DEMREQuestionNode] = st.session_state.diag_questions
     idx: int = st.session_state.diag_idx
 
     if idx >= len(diag_qs):
-        st.success("🎉 **¡Diagnóstico completado y guardado en tu perfil de Micro-Unidades!**")
+        st.success("🎉 **¡Diagnóstico completado y guardado en tu cuenta!**")
         col_d1, col_d2 = st.columns(2)
         with col_d1:
-            if st.button("👤 Ver mi Mapa de Micro-Unidades en el Dashboard", type="primary", use_container_width=True):
+            if st.button("👤 Ver mi Dashboard Actualizado", type="primary", use_container_width=True):
                 st.session_state.nav_section = "DASHBOARD"
                 st.rerun()
         with col_d2:
@@ -1226,21 +1077,21 @@ elif st.session_state.nav_section == "DIAGNOSTIC":
 
 
 # =====================================================================
-# SECCIÓN 3A: GUÍAS POR MICRO-UNIDAD - EXCLUSIVO PAES M1
+# SECCIÓN 3A: GUÍAS POR MATERIA (4 UNIDADES) - PAES M1
 # =====================================================================
 elif st.session_state.nav_section == "GUIDES_M1":
     render_exhaustive_study_guides_section(exam_target="M1")
 
 
 # =====================================================================
-# SECCIÓN 3B: GUÍAS POR MICRO-UNIDAD - EXCLUSIVO PAES M2
+# SECCIÓN 3B: GUÍAS POR MATERIA (4 UNIDADES) - PAES M2
 # =====================================================================
 elif st.session_state.nav_section == "GUIDES_M2":
     render_exhaustive_study_guides_section(exam_target="M2")
 
 
 # =====================================================================
-# SECCIÓN 4: ENSAYOS (DEBILIDADES POR MICRO-UNIDAD, FULL 65 Y MODO GENERAL)
+# SECCIÓN 4: ENSAYOS (DEBILIDADES, ENSAYO FULL 65 Y MODO GENERAL)
 # =====================================================================
 elif st.session_state.nav_section == "EXAMS":
     st.title("📝 Motor de Ensayos GoPAES")
@@ -1252,11 +1103,11 @@ elif st.session_state.nav_section == "EXAMS":
             with st.container(border=True):
                 st.subheader("🏛️ Ensayo Full Oficial PAES (65 Preguntas)")
                 st.write(
-                    "Simulación con la estructura y proporción exacta de ejes del DEMRE:\n"
-                    "- **16** de Números (24,6%)\n"
-                    "- **22** de Álgebra y Funciones (33,8%)\n"
-                    "- **14** de Geometría (21,5%)\n"
-                    "- **13** de Probabilidad y Estadística (20,0%)"
+                    "Simulación con la estructura y proporción exacta de las 4 Unidades del DEMRE:\n"
+                    "- **16** de Unidad 1: Números (24,6%)\n"
+                    "- **22** de Unidad 2: Álgebra y Funciones (33,8%)\n"
+                    "- **14** de Unidad 3: Geometría (21,5%)\n"
+                    "- **13** de Unidad 4: Probabilidad y Estadística (20,0%)"
                 )
                 full_timed = st.radio(
                     "Modalidad de Tiempo para el Ensayo Full:",
@@ -1278,7 +1129,7 @@ elif st.session_state.nav_section == "EXAMS":
                         "timed_mode": full_timed,
                         "allocated_seconds": 65 * OFFICIAL_SECONDS_PER_QUESTION["M1"],
                         "selection_mode": "OFFICIAL_65",
-                        "focus_micro_unit_id": None,
+                        "focus_axis": None,
                     }
                     st.session_state.exam_queue = queue_65
                     st.session_state.exam_history = []
@@ -1287,7 +1138,7 @@ elif st.session_state.nav_section == "EXAMS":
 
         with col_custom:
             with st.container(border=True):
-                st.subheader("🔥 Ensayo de Debilidades (Por Micro-Unidades) / Personalizado")
+                st.subheader("🔥 Ensayo de Debilidades / Personalizado")
                 ignore_weights = st.toggle(
                     "⚖️ Modo Ensayo General (Ignorar temporalmente mis debilidades al elegir preguntas, pero guardar todo en mi perfil)",
                     value=(st.session_state.exam_config.get("selection_mode") == "GENERAL_STANDARD"),
@@ -1301,17 +1152,13 @@ elif st.session_state.nav_section == "EXAMS":
                     format_func=lambda x: "M1 (Obligatoria)" if x == "M1" else "M2 (Electiva Científica)",
                 )
 
-                # Permitir atacar todas las micro-unidades débiles automáticamente o elegir una micro-unidad específica
-                valid_mu_options = ["ALL_ADAPTIVE"] + [
-                    uid for uid, m in CANONICAL_MICRO_UNITS.items() if exam_choice in m["exams"]
-                ]
-                selected_mu_filter = st.selectbox(
-                    "Nicho / Micro-Unidad objetivo:",
-                    options=valid_mu_options,
-                    format_func=lambda uid: (
-                        "🧠 Automático IA (Atacar mis Micro-Unidades más débiles)"
-                        if uid == "ALL_ADAPTIVE"
-                        else f"🎯 Solo '{CANONICAL_MICRO_UNITS[uid]['name']}' (Dominio: {get_micro_unit_mastery_pct(engine, uid)}%)"
+                unit_filter = st.selectbox(
+                    "Unidad a evaluar:",
+                    options=["ALL_UNITS"] + list(ALL_AXES),
+                    format_func=lambda a: (
+                        "🧠 Todas las 4 Unidades (Adaptativo según mis debilidades)"
+                        if a == "ALL_UNITS"
+                        else f"{UNIT_ICONS[a]} Solo {UNIT_NUMBER_LABELS[a]} (Dominio: {round(engine.axes_state[a].mastery_score * 100)}%)"
                     ),
                 )
 
@@ -1319,7 +1166,7 @@ elif st.session_state.nav_section == "EXAMS":
                     "Cantidad de preguntas:",
                     min_value=2,
                     max_value=65 if exam_choice == "M1" else 55,
-                    value=6,
+                    value=5,
                 )
                 custom_timed = st.radio(
                     "Modalidad de Tiempo:",
@@ -1340,34 +1187,22 @@ elif st.session_state.nav_section == "EXAMS":
                     else f"🔥 Iniciar Ensayo de Debilidades ({exam_choice})"
                 )
                 if st.button(btn_label, type="primary", use_container_width=True):
-                    focus_uid = None if selected_mu_filter == "ALL_ADAPTIVE" else selected_mu_filter
-                    if focus_uid:
-                        meta_u = CANONICAL_MICRO_UNITS[focus_uid]
-                        queue = build_unit_exercise_queue_safe(
-                            engine_inst=engine,
-                            vector_store=st.session_state.vector_store,
-                            exam=exam_choice,
-                            axis=meta_u["axis"],  # type: ignore
-                            subtopic_keyword=meta_u["keyword"],
-                            num_questions=num_q,
-                            exclude_ids=st.session_state.asked_ids,
-                            micro_unit_id=focus_uid,
-                        )
-                    else:
-                        queue = engine.build_exam_question_queue(
-                            vector_store=st.session_state.vector_store,
-                            exam=exam_choice,
-                            num_questions=num_q,
-                            mode=chosen_mode,
-                            asked_ids=st.session_state.asked_ids,
-                        )
+                    focus_ax = None if unit_filter == "ALL_UNITS" else unit_filter
+                    queue = engine.build_exam_question_queue(
+                        vector_store=st.session_state.vector_store,
+                        exam=exam_choice,
+                        num_questions=num_q,
+                        mode=chosen_mode,
+                        asked_ids=st.session_state.asked_ids,
+                        focus_axis=focus_ax,  # type: ignore
+                    )
                     st.session_state.exam_config = {
                         "exam": exam_choice,
                         "num_questions": len(queue),
                         "timed_mode": custom_timed,
                         "allocated_seconds": len(queue) * sec_per_q,
                         "selection_mode": chosen_mode,
-                        "focus_micro_unit_id": focus_uid,
+                        "focus_axis": focus_ax,
                     }
                     st.session_state.exam_queue = queue
                     st.session_state.exam_history = []
@@ -1386,29 +1221,26 @@ elif st.session_state.nav_section == "EXAMS":
 
         q: DEMREQuestionNode = st.session_state.exam_queue[step_idx]
         mode_active: SelectionMode = cfg.get("selection_mode", "ADAPTIVE")
-        q_mu_id = getattr(q, "micro_unit_id", "NUM_CONJUNTOS")
-        q_mu_name = CANONICAL_MICRO_UNITS.get(q_mu_id, {}).get("name", q.subtopic_name)
-        q_mu_dom = get_micro_unit_mastery_pct(engine, q_mu_id)
-        mu_probs = get_micro_unit_probabilities_safe(engine, exam=cfg["exam"], mode=mode_active)
-        mu_prob_pct = round(mu_probs.get(q_mu_id, 0.05) * 100, 1)
+        probs = engine.compute_sampling_probabilities(mode=mode_active)
+        axis_prob = round(probs[q.thematic_axis] * 100, 1)
 
         col_reason, col_clock, col_finish = st.columns([3, 1, 1])
         with col_reason:
             if mode_active == "ADAPTIVE":
                 st.warning(
                     f"🔥 **Ensayo de Debilidades GoPAES ({cfg['exam']}):** "
-                    f"Atacando Micro-Unidad **{q_mu_name}** "
-                    f"(Tu dominio actual: `{q_mu_dom}%` • Peso IA: **{mu_prob_pct}%**)."
+                    f"**{UNIT_NUMBER_LABELS[q.thematic_axis]}** — Subtema: *{q.subtopic_name}* "
+                    f"(Prioridad IA de la unidad: **{axis_prob}%**)."
                 )
             elif mode_active == "GENERAL_STANDARD":
                 st.info(
                     f"⚖️ **Ensayo General Estándar ({cfg['exam']}):** "
-                    f"Eje **{AXIS_LABELS[q.thematic_axis]}** • Micro-Unidad: **{q_mu_name}**."
+                    f"**{UNIT_NUMBER_LABELS[q.thematic_axis]}** (Proporción estándar DEMRE: **{axis_prob}%**)."
                 )
             else:
                 st.info(
-                    f"🏛️ **Ensayo Full 65 Preguntas:** Eje **{AXIS_LABELS[q.thematic_axis]}** "
-                    f"({q_mu_name} • Cuota del eje: {OFFICIAL_PAES_65_DISTRIBUTION[q.thematic_axis]}/65)."
+                    f"🏛️ **Ensayo Full 65 Preguntas:** **{UNIT_NUMBER_LABELS[q.thematic_axis]}** "
+                    f"(Cuota oficial DEMRE: {OFFICIAL_PAES_65_DISTRIBUTION[q.thematic_axis]}/65)."
                 )
         with col_clock:
             if cfg["timed_mode"]:
@@ -1454,10 +1286,9 @@ elif st.session_state.nav_section == "EXAMS":
                     "state": state,
                 })
 
-                # Re-adaptar dinámicamente la cola restante en modo ADAPTIVE según la micro-unidad fallada
                 if (
                     cfg.get("selection_mode") == "ADAPTIVE"
-                    and not cfg.get("focus_micro_unit_id")
+                    and not cfg.get("focus_axis")
                     and (step_idx + 1) < total_q
                 ):
                     remaining_count = total_q - (step_idx + 1)
@@ -1487,7 +1318,7 @@ elif st.session_state.nav_section == "EXAMS":
 
     elif st.session_state.exam_subphase == "COACHING_RESULTS":
         st.balloons()
-        st.subheader("🎓 GoPAES Coaching IA • Análisis por Micro-Unidad en LaTeX")
+        st.subheader("🎓 GoPAES Coaching IA • Análisis de Errores y Omisiones en LaTeX")
 
         history = st.session_state.exam_history
         correct_total = sum(1 for h in history if h["state"] == "CORRECT")
@@ -1508,24 +1339,22 @@ elif st.session_state.nav_section == "EXAMS":
             q: DEMREQuestionNode = item["question"]
             sel = item["selected_option"]
             st_resp = item["state"]
-            q_mu_id = getattr(q, "micro_unit_id", "NUM_CONJUNTOS")
-            q_mu_name = CANONICAL_MICRO_UNITS.get(q_mu_id, {}).get("name", q.subtopic_name)
             cache_key = f"{idx}_{q.node_id}_{sel}_{st_resp}"
 
             with st.container(border=True):
                 if st_resp == "CORRECT":
                     st.success(
-                        f"**Pregunta {idx + 1} ({AXIS_LABELS[q.thematic_axis]} • Micro-Unidad: {q_mu_name}): "
+                        f"**Pregunta {idx + 1} ({UNIT_NUMBER_LABELS[q.thematic_axis]} - {q.subtopic_name}): "
                         f"✅ CORRECTA (Marcaste {sel})**"
                     )
                 elif st_resp == "OMITTED":
                     st.warning(
-                        f"**Pregunta {idx + 1} ({AXIS_LABELS[q.thematic_axis]} • Micro-Unidad: {q_mu_name}): "
+                        f"**Pregunta {idx + 1} ({UNIT_NUMBER_LABELS[q.thematic_axis]} - {q.subtopic_name}): "
                         f"🏳️ DEJADA EN BLANCO (Vacío de Conocimiento • Clave Oficial: {q.correct_option})**"
                     )
                 else:
                     st.error(
-                        f"**Pregunta {idx + 1} ({AXIS_LABELS[q.thematic_axis]} • Micro-Unidad: {q_mu_name}): "
+                        f"**Pregunta {idx + 1} ({UNIT_NUMBER_LABELS[q.thematic_axis]} - {q.subtopic_name}): "
                         f"❌ ERROR CONCEPTUAL (Marcaste {sel} • Clave Oficial: {q.correct_option})**"
                     )
 
@@ -1568,7 +1397,7 @@ elif st.session_state.nav_section == "EXAMS":
                 st.session_state.exam_subphase = "CONFIG"
                 st.rerun()
         with col_go_dash:
-            if st.button("👤 Ir a mi Dashboard de Micro-Unidades", use_container_width=True):
+            if st.button("👤 Ir a mi Dashboard de Progreso", use_container_width=True):
                 st.session_state.exam_subphase = "CONFIG"
                 st.session_state.nav_section = "DASHBOARD"
                 st.rerun()
