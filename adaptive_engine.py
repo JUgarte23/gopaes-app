@@ -821,10 +821,12 @@ class GoPAESAdaptiveEngine:
 
 class GoPAESLLMCoach:
     GEMINI_MODELS_CASCADE = [
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-pro-preview",
         "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-1.5-flash-latest",
-        "gemini-1.5-flash",
     ]
 
     @staticmethod
@@ -863,54 +865,47 @@ class GoPAESLLMCoach:
 
         if manual_clean:
             if manual_clean.startswith("sk-"):
-                return "openai", manual_clean, "Ingresada manualmente en barra lateral (OpenAI)"
-            if manual_clean.startswith("AIza"):
-                return "gemini", manual_clean, "Ingresada manualmente en barra lateral (Gemini)"
-            return provider, manual_clean, "Ingresada manualmente en barra lateral"
+                return "openai", manual_clean, "Configuración privada (OpenAI)"
+            if manual_clean.startswith(("AIza", "AQ.")):
+                return "gemini", manual_clean, "Configuración privada (Gemini)"
+            return provider, manual_clean, "Configuración privada"
 
         if provider == "gemini":
             if secret_gemini:
-                return "gemini", secret_gemini, "Streamlit Cloud Secrets (GEMINI_API_KEY)"
+                return "gemini", secret_gemini, "Streamlit Cloud Secrets"
             if env_gemini:
-                return "gemini", env_gemini, "Archivo local .env (GEMINI_API_KEY)"
+                return "gemini", env_gemini, "Variables de entorno (.env)"
             if secret_openai or env_openai:
-                return "openai", (secret_openai or env_openai), "Fallback automático a OPENAI_API_KEY"
+                return "openai", (secret_openai or env_openai), "Streamlit Cloud Secrets"
         else:
             if secret_openai:
-                return "openai", secret_openai, "Streamlit Cloud Secrets (OPENAI_API_KEY)"
+                return "openai", secret_openai, "Streamlit Cloud Secrets"
             if env_openai:
-                return "openai", env_openai, "Archivo local .env (OPENAI_API_KEY)"
+                return "openai", env_openai, "Variables de entorno (.env)"
             if secret_gemini or env_gemini:
-                return "gemini", (secret_gemini or env_gemini), "Fallback automático a GEMINI_API_KEY"
+                return "gemini", (secret_gemini or env_gemini), "Streamlit Cloud Secrets"
 
         return provider, None, "Sin clave configurada"
 
     @classmethod
     def validate_key_format(cls, provider: str, api_key: Optional[str]) -> Tuple[bool, str]:
         if not api_key:
-            return False, "No se encontró ninguna API Key configurada en `.env`, `st.secrets` ni en la barra lateral."
+            return False, "Servicio de IA pendiente de configuración en Secrets."
 
         if provider == "gemini":
-            if api_key.startswith("AQ."):
+            if not api_key.startswith(("AIza", "AQ.")):
                 return (
                     False,
-                    "La clave ingresada comienza con `AQ.` (token de sesión/OAuth), no es una API Key de Gemini. "
-                    "Las API Keys válidas de Google AI Studio siempre comienzan con **`AIzaSy...`**. "
-                    "Obtén una gratis en https://aistudio.google.com/apikey y pégala en el cuadro de la izquierda.",
-                )
-            if not api_key.startswith("AIza"):
-                return (
-                    False,
-                    f"El formato de la clave (`{api_key[:6]}...`) no parece una clave estándar de Google AI Studio (`AIzaSy...`).",
+                    "Formato de clave Gemini no reconocido.",
                 )
         elif provider == "openai":
             if not api_key.startswith("sk-"):
                 return (
                     False,
-                    f"El formato de la clave (`{api_key[:6]}...`) no parece una clave estándar de OpenAI (`sk-...`).",
+                    "Formato de clave OpenAI no reconocido.",
                 )
 
-        return True, "Formato de API Key válido."
+        return True, "En línea"
 
     @classmethod
     def test_connection(

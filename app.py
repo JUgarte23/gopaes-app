@@ -35,6 +35,30 @@ from adaptive_engine import (
     ALL_AXES,
 )
 
+# Compatibilidad automática con claves AQ.Ab8RN... y modelos Gemini 3.x / 2.5
+GoPAESLLMCoach.GEMINI_MODELS_CASCADE = [
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-latest",
+]
+
+
+@classmethod
+def _validate_key_accepting_aq(cls, provider: str, api_key: str | None) -> tuple[bool, str]:
+    if not api_key:
+        return False, "Sin clave configurada"
+    if provider == "gemini" and not api_key.startswith(("AIza", "AQ.")):
+        return False, "Formato no reconocido"
+    if provider == "openai" and not api_key.startswith("sk-"):
+        return False, "Formato no reconocido"
+    return True, "En línea"
+
+
+GoPAESLLMCoach.validate_key_format = _validate_key_accepting_aq
+
 # =====================================================================
 # CONFIGURACIÓN DE PÁGINA STREAMLIT - GOPAES
 # =====================================================================
@@ -361,77 +385,29 @@ with st.sidebar:
 
     st.divider()
 
-    # CONEXIÓN Y DIAGNÓSTICO DE AUTENTICACIÓN DEL LLM
-    with st.expander("🔑 Conexión API LLM (Gemini / OpenAI)", expanded=False):
-        default_prov = os.getenv("GOPAES_LLM_PROVIDER", "gemini").lower()
-        llm_provider = st.selectbox(
-            "Proveedor IA:",
-            options=["gemini", "openai"],
-            index=0 if default_prov == "gemini" else 1,
-        )
-        manual_api_key = st.text_input(
-            f"API Key ({llm_provider.upper()}) [Opcional si usas Secrets]:",
-            type="password",
-            placeholder="AIzaSy... (Gemini) o sk-... (OpenAI)",
-        )
+    # INDICADORES DE ESTADO EN LÍNEA (CREDENTIALES 100% OCULTAS EN STREAMLIT SECRETS)
+    prov_active, resolved_key, _ = GoPAESLLMCoach.resolve_credentials()
+    is_ia_online, _ = GoPAESLLMCoach.validate_key_format(prov_active, resolved_key)
 
-        st.session_state.llm_provider_choice = llm_provider
-        st.session_state.llm_manual_key = manual_api_key
-
-        _, resolved_key, key_source = GoPAESLLMCoach.resolve_credentials(manual_api_key, llm_provider)
-        is_valid_fmt, fmt_msg = GoPAESLLMCoach.validate_key_format(llm_provider, resolved_key)
-
-        if is_valid_fmt:
-            st.success(f"Clave detectada ({key_source})")
-        else:
-            st.warning(fmt_msg)
-
-        if st.button("🔌 Probar Conexión IA Ahora", use_container_width=True):
-            with st.spinner("Verificando credenciales con el servidor LLM..."):
-                ok, msg = GoPAESLLMCoach.test_connection(manual_api_key, llm_provider)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-
-    # CONEXIÓN A BASE DE DATOS EN LA NUBE (SUPABASE)
-    supa_url, supa_key, supa_src = GoPAESProfileManager.resolve_supabase_credentials(
-        st.session_state.get("supabase_manual_url"),
-        st.session_state.get("supabase_manual_key"),
-    )
-    if supa_url and supa_key:
-        st.caption("☁️ Almacenamiento: **✅ Supabase (Permanente)**")
+    if hasattr(GoPAESProfileManager, "resolve_supabase_credentials"):
+        supa_url, supa_key, _ = GoPAESProfileManager.resolve_supabase_credentials()
     else:
-        st.caption("☁️ Almacenamiento: **⚠️ Disco Local (Se reinicia en la nube)**")
+        supa_url = os.getenv("SUPABASE_URL")
+        supa_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    is_db_online = bool(supa_url and supa_key)
 
-    with st.expander("☁️ Base de Datos Supabase (Guardado Permanente)", expanded=False):
-        st.markdown(
-            "Conecta tu proyecto gratuito de **Supabase** para que tus usuarios, contraseñas y progreso "
-            "se guarden para siempre y no se borren al reiniciar Streamlit Cloud."
-        )
-        s_url = st.text_input(
-            "Supabase Project URL:",
-            value=os.getenv("SUPABASE_URL", ""),
-            placeholder="https://xyzcompany.supabase.co",
-            key="input_supabase_url",
-        )
-        s_key = st.text_input(
-            "Supabase Anon / Service Key:",
-            value=os.getenv("SUPABASE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", ""),
-            type="password",
-            placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-            key="input_supabase_key",
-        )
-        st.session_state.supabase_manual_url = s_url
-        st.session_state.supabase_manual_key = s_key
+    st.markdown("### 📡 Estado del Sistema")
+    if is_ia_online:
+        st.caption("🟢 **Coaching IA:** En línea")
+    else:
+        st.caption("🟡 **Coaching IA:** Motor Interno Activo")
 
-        if st.button("🔌 Probar Conexión Supabase", use_container_width=True):
-            with st.spinner("Conectando con Supabase..."):
-                ok_s, msg_s = GoPAESProfileManager.supabase_test_connection(s_url, s_key)
-                if ok_s:
-                    st.success(msg_s)
-                else:
-                    st.error(msg_s)
+    if is_db_online:
+        st.caption("🟢 **Base de Datos Cloud:** En línea")
+    else:
+        st.caption("🟡 **Base de Datos:** Almacenamiento Local")
+
+    st.divider()
 
     # PANEL DE TRANSPARENCIA EN LAS 4 UNIDADES (IDÉNTICAS AL DASHBOARD Y LAS GUÍAS)
     st.markdown("### 🧠 Dominio por Unidad")
@@ -958,17 +934,18 @@ if st.session_state.nav_section == "DASHBOARD":
         "(**Números**, **Álgebra y Funciones**, **Geometría**, **Probabilidad y Estadística**)."
     )
 
-    # Estado de persistencia en la nube
-    supa_u, supa_k, supa_src = GoPAESProfileManager.resolve_supabase_credentials(
-        st.session_state.get("supabase_manual_url"),
-        st.session_state.get("supabase_manual_key"),
-    )
+    # Indicador discreto de servicios en línea
+    if hasattr(GoPAESProfileManager, "resolve_supabase_credentials"):
+        supa_u, supa_k, _ = GoPAESProfileManager.resolve_supabase_credentials()
+    else:
+        supa_u, supa_k = os.getenv("SUPABASE_URL"), (os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
+
     col_cloud_status, col_backup_btn = st.columns([3, 1])
     with col_cloud_status:
         if supa_u and supa_k:
-            st.success("☁️ **Almacenamiento Permanente Activo:** Tu perfil, racha y dominio están sincronizados con tu base de datos **Supabase**.")
+            st.success("🟢 **Servicios GoPAES En Línea:** Tu progreso y racha se guardan automáticamente en la nube.")
         else:
-            st.info("💡 **Almacenamiento Local:** Si despliegas en Streamlit Cloud, conecta **Supabase** en la barra lateral para guardar tus datos para siempre.")
+            st.info("🟡 **Modo Local Activo:** Tu progreso se está guardando en este dispositivo.")
     with col_backup_btn:
         prof_json = json.dumps(profile.model_dump(), ensure_ascii=False, indent=2)
         st.download_button(
