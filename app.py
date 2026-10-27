@@ -394,6 +394,45 @@ with st.sidebar:
                 else:
                     st.error(msg)
 
+    # CONEXIÓN A BASE DE DATOS EN LA NUBE (SUPABASE)
+    supa_url, supa_key, supa_src = GoPAESProfileManager.resolve_supabase_credentials(
+        st.session_state.get("supabase_manual_url"),
+        st.session_state.get("supabase_manual_key"),
+    )
+    if supa_url and supa_key:
+        st.caption("☁️ Almacenamiento: **✅ Supabase (Permanente)**")
+    else:
+        st.caption("☁️ Almacenamiento: **⚠️ Disco Local (Se reinicia en la nube)**")
+
+    with st.expander("☁️ Base de Datos Supabase (Guardado Permanente)", expanded=False):
+        st.markdown(
+            "Conecta tu proyecto gratuito de **Supabase** para que tus usuarios, contraseñas y progreso "
+            "se guarden para siempre y no se borren al reiniciar Streamlit Cloud."
+        )
+        s_url = st.text_input(
+            "Supabase Project URL:",
+            value=os.getenv("SUPABASE_URL", ""),
+            placeholder="https://xyzcompany.supabase.co",
+            key="input_supabase_url",
+        )
+        s_key = st.text_input(
+            "Supabase Anon / Service Key:",
+            value=os.getenv("SUPABASE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", ""),
+            type="password",
+            placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+            key="input_supabase_key",
+        )
+        st.session_state.supabase_manual_url = s_url
+        st.session_state.supabase_manual_key = s_key
+
+        if st.button("🔌 Probar Conexión Supabase", use_container_width=True):
+            with st.spinner("Conectando con Supabase..."):
+                ok_s, msg_s = GoPAESProfileManager.supabase_test_connection(s_url, s_key)
+                if ok_s:
+                    st.success(msg_s)
+                else:
+                    st.error(msg_s)
+
     # PANEL DE TRANSPARENCIA EN LAS 4 UNIDADES (IDÉNTICAS AL DASHBOARD Y LAS GUÍAS)
     st.markdown("### 🧠 Dominio por Unidad")
     adaptive_probs = engine.compute_sampling_probabilities(mode="ADAPTIVE")
@@ -918,6 +957,27 @@ if st.session_state.nav_section == "DASHBOARD":
         "Tu progreso está resguardado bajo tu cuenta personal y organizado en las **4 Unidades Oficiales DEMRE** "
         "(**Números**, **Álgebra y Funciones**, **Geometría**, **Probabilidad y Estadística**)."
     )
+
+    # Estado de persistencia en la nube
+    supa_u, supa_k, supa_src = GoPAESProfileManager.resolve_supabase_credentials(
+        st.session_state.get("supabase_manual_url"),
+        st.session_state.get("supabase_manual_key"),
+    )
+    col_cloud_status, col_backup_btn = st.columns([3, 1])
+    with col_cloud_status:
+        if supa_u and supa_k:
+            st.success("☁️ **Almacenamiento Permanente Activo:** Tu perfil, racha y dominio están sincronizados con tu base de datos **Supabase**.")
+        else:
+            st.info("💡 **Almacenamiento Local:** Si despliegas en Streamlit Cloud, conecta **Supabase** en la barra lateral para guardar tus datos para siempre.")
+    with col_backup_btn:
+        prof_json = json.dumps(profile.model_dump(), ensure_ascii=False, indent=2)
+        st.download_button(
+            label="📥 Descargar Respaldo (.json)",
+            data=prof_json,
+            file_name=f"gopaes_respaldo_{profile.username}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("🔥 Racha de Estudio", f"{profile.study_streak} día(s)", "Activa hoy")

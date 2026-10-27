@@ -143,6 +143,129 @@ class GoPAESProfileManager:
         return dk.hex()
 
     @classmethod
+    def resolve_supabase_credentials(
+        cls,
+        override_url: Optional[str] = None,
+        override_key: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str], str]:
+        """
+        Detecta credenciales de Supabase desde Streamlit Secrets, variables de entorno o parámetros manuales.
+        """
+        secret_url = None
+        secret_key = None
+        try:
+            import streamlit as st
+            secret_url = st.secrets.get("SUPABASE_URL")
+            secret_key = st.secrets.get("SUPABASE_KEY") or st.secrets.get("SUPABASE_ANON_KEY")
+        except Exception:
+            pass
+
+        env_url = os.getenv("SUPABASE_URL")
+        env_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+
+        url = (override_url or secret_url or env_url or "").strip().rstrip("/")
+        key = (override_key or secret_key or env_key or "").strip()
+
+        if url and key:
+            if override_url or override_key:
+                return url, key, "Ingresada manualmente"
+            if secret_url:
+                return url, key, "Streamlit Secrets"
+            return url, key, "Archivo .env"
+        return None, None, "No configurada"
+
+    @classmethod
+    def supabase_test_connection(
+        cls, override_url: Optional[str] = None, override_key: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        url, key, source = cls.resolve_supabase_credentials(override_url, override_key)
+        if not url or not key:
+            return (
+                False,
+                "No se han configurado `SUPABASE_URL` ni `SUPABASE_KEY`. Configúralas en `st.secrets`, `.env` o en la barra lateral.",
+            )
+
+        endpoint = f"{url}/rest/v1/gopaes_profiles?select=username&limit=1"
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = requests.get(endpoint, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                return True, f"✅ Conexión exitosa a Supabase ({source}). La tabla `gopaes_profiles` está lista y persistente."
+            if resp.status_code in (401, 403):
+                return False, f"❌ Error de autenticación en Supabase ({resp.status_code}): Clave API inválida."
+            if resp.status_code == 404:
+                return False, "❌ La tabla `gopaes_profiles` no existe aún en Supabase. Ejecuta el script SQL en Supabase SQL Editor."
+            return False, f"❌ Respuesta inesperada de Supabase ({resp.status_code}): {resp.text[:150]}"
+        except Exception as e:
+            return False, f"❌ Error de red al conectar con Supabase: {str(e)}"
+
+    @classmethod
+    def _supabase_headers(cls, key: str) -> dict:
+        return {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def _supabase_fetch_profile(cls, username: str) -> Optional[UserProfileData]:
+        url, key, _ = cls.resolve_supabase_credentials()
+        if not url or not key:
+            return None
+        endpoint = f"{url}/rest/v1/gopaes_profiles?username=eq.{username.strip()}&select=*"
+        try:
+            resp = requests.get(endpoint, headers=cls._supabase_headers(key), timeout=10)
+            if resp.status_code == 200:
+                rows = resp.json()
+                if rows and len(rows) > 0:
+                    raw = rows[0]
+                    # Parsear campos JSONB si vienen como string
+                    for field in ("axes_state", "micro_units_state", "logs"):
+                        if isinstance(raw.get(field), str):
+                            try:
+                                raw[field] = json.loads(raw[field])
+                            except Exception:
+                                pass
+                    return UserProfileData(**raw)
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _supabase_upsert_profile(cls, profile: UserProfileData) -> bool:
+        url, key, _ = cls.resolve_supabase_credentials()
+        if not url or not key:
+            return False
+        endpoint = f"{url}/rest/v1/gopaes_profiles"
+        headers = cls._supabase_headers(key)
+        headers["Prefer"] = "resolution=merge-duplicates"
+
+        payload = profile.model_dump()
+        try:
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=12)
+            return resp.status_code in (200, 201)
+        except Exception:
+            return False
+
+    @classmethod
+    def _supabase_list_usernames(cls) -> List[str]:
+        url, key, _ = cls.resolve_supabase_credentials()
+        if not url or not key:
+            return []
+        endpoint = f"{url}/rest/v1/gopaes_profiles?select=username"
+        try:
+            resp = requests.get(endpoint, headers=cls._supabase_headers(key), timeout=10)
+            if resp.status_code == 200:
+                return [r["username"] for r in resp.json() if "username" in r]
+        except Exception:
+            pass
+        return []
+
+    @classmethod
     def _ensure_storage(cls) -> Dict[str, dict]:
         cls.STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
         if not cls.STORAGE_PATH.exists():
@@ -155,8 +278,10 @@ class GoPAESProfileManager:
 
     @classmethod
     def list_existing_profiles(cls) -> List[str]:
-        data = cls._ensure_storage()
-        return sorted(list(data.keys()))
+        cloud_users = cls._supabase_list_usernames()
+        local_data = cls._ensure_storage()
+        all_users = set(cloud_users + list(local_data.keys()))
+        return sorted(list(all_users))
 
     @classmethod
     def register_user(
@@ -168,26 +293,35 @@ class GoPAESProfileManager:
         if len(password) < 4:
             return False, "La contraseña debe tener al menos 4 caracteres.", None
 
+        # 1. Verificar si existe en Supabase o en local
+        cloud_prof = cls._supabase_fetch_profile(clean_name)
         data = cls._ensure_storage()
-        # Verificar si el usuario ya existe (insensible a mayúsculas/minúsculas)
         existing_key = next(
             (k for k in data.keys() if k.lower() == clean_name.lower()), None
         )
-        if existing_key is not None:
-            existing_prof = data[existing_key]
-            if existing_prof.get("password_hash"):
-                return (
-                    False,
-                    f"El usuario '{existing_key}' ya está registrado. Ve a la pestaña 'Iniciar Sesión'.",
-                    None,
-                )
-            # Si era un perfil antiguo sin contraseña, le asignamos esta nueva contraseña conservando sus datos
-            clean_name = existing_key
+
+        if cloud_prof and cloud_prof.password_hash:
+            return (
+                False,
+                f"El usuario '{cloud_prof.username}' ya está registrado en la nube. Ve a 'Iniciar Sesión'.",
+                None,
+            )
+
+        if existing_key is not None and data[existing_key].get("password_hash"):
+            return (
+                False,
+                f"El usuario '{existing_key}' ya está registrado. Ve a 'Iniciar Sesión'.",
+                None,
+            )
 
         salt_hex = secrets.token_hex(16)
         pwd_hash = cls._hash_password(password, salt_hex)
 
-        if existing_key is not None:
+        if cloud_prof:
+            profile = cloud_prof
+            profile.password_salt = salt_hex
+            profile.password_hash = pwd_hash
+        elif existing_key is not None:
             profile = UserProfileData(**data[existing_key])
             profile.password_salt = salt_hex
             profile.password_hash = pwd_hash
@@ -209,32 +343,33 @@ class GoPAESProfileManager:
         if not clean_name or not password:
             return False, "Por favor ingresa tu usuario y contraseña.", None
 
+        # Intentar cargar desde Supabase primero, luego fallback a local
+        profile = cls._supabase_fetch_profile(clean_name)
         data = cls._ensure_storage()
         matched_key = next(
             (k for k in data.keys() if k.lower() == clean_name.lower()), None
         )
-        if matched_key is None:
+
+        if profile is None and matched_key is None:
             return (
                 False,
                 f"No existe una cuenta registrada para '{clean_name}'. Regístrate primero en la pestaña 'Registrarse'.",
                 None,
             )
 
-        raw_prof = data[matched_key]
-        stored_hash = raw_prof.get("password_hash", "")
-        stored_salt = raw_prof.get("password_salt", "")
+        if profile is None and matched_key is not None:
+            profile = UserProfileData(**data[matched_key])
 
-        # Si es un perfil legado creado antes del sistema de contraseñas, vincular la contraseña ingresada
+        stored_hash = profile.password_hash
+        stored_salt = profile.password_salt
+
+        # Si es un perfil antiguo sin contraseña configurada, asignarle esta contraseña
         if not stored_hash or not stored_salt:
             salt_hex = secrets.token_hex(16)
             new_hash = cls._hash_password(password, salt_hex)
-            raw_prof["password_salt"] = salt_hex
-            raw_prof["password_hash"] = new_hash
-            data[matched_key] = raw_prof
-            cls.STORAGE_PATH.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            profile = cls.load_or_create_profile(matched_key)
+            profile.password_salt = salt_hex
+            profile.password_hash = new_hash
+            cls.save_profile(profile)
             return (
                 True,
                 f"Contraseña configurada y sesión iniciada para {profile.username}.",
@@ -245,48 +380,57 @@ class GoPAESProfileManager:
         if not hmac.compare_digest(stored_hash, candidate_hash):
             return False, "❌ Contraseña incorrecta. Verifica tus credenciales.", None
 
-        profile = cls.load_or_create_profile(matched_key)
+        # Actualizar racha y actividad
+        cls.save_profile(profile)
         return True, f"Bienvenido nuevamente, {profile.username}.", profile
 
     @classmethod
     def load_or_create_profile(cls, username: str) -> UserProfileData:
         clean_name = username.strip()
-        data = cls._ensure_storage()
         today_str = datetime.date.today().isoformat()
 
-        if clean_name in data:
-            raw_prof = data[clean_name]
-            profile = UserProfileData(**raw_prof)
-            default_units = _default_micro_units_state()
-            for uid, def_state in default_units.items():
-                if uid not in profile.micro_units_state:
-                    profile.micro_units_state[uid] = def_state
+        # 1. Intentar obtener desde Supabase
+        cloud_prof = cls._supabase_fetch_profile(clean_name)
+        data = cls._ensure_storage()
 
-            try:
-                last_date = datetime.date.fromisoformat(profile.last_activity_date)
-                today_date = datetime.date.today()
-                diff_days = (today_date - last_date).days
-                if diff_days == 1:
-                    profile.study_streak += 1
-                elif diff_days > 1:
-                    profile.study_streak = 1
-                profile.last_activity_date = today_str
-            except Exception:
-                profile.last_activity_date = today_str
+        if cloud_prof:
+            profile = cloud_prof
+        elif clean_name in data:
+            profile = UserProfileData(**data[clean_name])
         else:
             profile = UserProfileData(username=clean_name)
+
+        default_units = _default_micro_units_state()
+        for uid, def_state in default_units.items():
+            if uid not in profile.micro_units_state:
+                profile.micro_units_state[uid] = def_state
+
+        try:
+            last_date = datetime.date.fromisoformat(profile.last_activity_date)
+            today_date = datetime.date.today()
+            diff_days = (today_date - last_date).days
+            if diff_days == 1:
+                profile.study_streak += 1
+            elif diff_days > 1:
+                profile.study_streak = 1
+            profile.last_activity_date = today_str
+        except Exception:
+            profile.last_activity_date = today_str
 
         cls.save_profile(profile)
         return profile
 
     @classmethod
     def save_profile(cls, profile: UserProfileData) -> None:
+        # 1. Guardar copia local en disco
         data = cls._ensure_storage()
         data[profile.username] = profile.model_dump()
         cls.STORAGE_PATH.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # 2. Sincronizar en la nube con Supabase (si está configurado)
+        cls._supabase_upsert_profile(profile)
 
 
 # =====================================================================
