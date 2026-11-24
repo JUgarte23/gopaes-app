@@ -120,6 +120,10 @@ class UserProfileData(BaseModel):
     study_streak: int = 1
     completed_exams: int = 0
     diagnostic_completed: bool = False
+    elo_rating: int = 1000
+    duel_wins: int = 0
+    duel_losses: int = 0
+    duel_draws: int = 0
     axes_state: Dict[ThematicAxis, AxisMasteryState] = Field(
         default_factory=lambda: {axis: AxisMasteryState(axis=axis) for axis in ALL_AXES}
     )
@@ -212,6 +216,24 @@ class GoPAESProfileManager:
         }
 
     @classmethod
+    def _unpack_gamification_from_raw(cls, raw: dict) -> UserProfileData:
+        for field in ("axes_state", "micro_units_state", "logs"):
+            if isinstance(raw.get(field), str):
+                try:
+                    raw[field] = json.loads(raw[field])
+                except Exception:
+                    pass
+        mu_dict = raw.get("micro_units_state") or {}
+        if isinstance(mu_dict, dict) and "__GAMIFICATION__" in mu_dict:
+            g_meta = mu_dict.pop("__GAMIFICATION__", {})
+            if isinstance(g_meta, dict):
+                raw.setdefault("elo_rating", g_meta.get("correct_count", 1000) or 1000)
+                raw.setdefault("duel_wins", g_meta.get("incorrect_count", 0))
+                raw.setdefault("duel_losses", g_meta.get("omitted_count", 0))
+                raw.setdefault("duel_draws", g_meta.get("total_seen", 0))
+        return UserProfileData(**raw)
+
+    @classmethod
     def _supabase_fetch_profile(cls, username: str) -> Optional[UserProfileData]:
         url, key, _ = cls.resolve_supabase_credentials()
         if not url or not key:
@@ -222,15 +244,7 @@ class GoPAESProfileManager:
             if resp.status_code == 200:
                 rows = resp.json()
                 if rows and len(rows) > 0:
-                    raw = rows[0]
-                    # Parsear campos JSONB si vienen como string
-                    for field in ("axes_state", "micro_units_state", "logs"):
-                        if isinstance(raw.get(field), str):
-                            try:
-                                raw[field] = json.loads(raw[field])
-                            except Exception:
-                                pass
-                    return UserProfileData(**raw)
+                    return cls._unpack_gamification_from_raw(rows[0])
         except Exception:
             pass
         return None
@@ -244,12 +258,77 @@ class GoPAESProfileManager:
         headers = cls._supabase_headers(key)
         headers["Prefer"] = "resolution=merge-duplicates"
 
-        payload = profile.model_dump()
+        full_dump = profile.model_dump()
+        mu_copy = dict(full_dump.get("micro_units_state") or {})
+        mu_copy["__GAMIFICATION__"] = {
+            "unit_id": "__GAMIFICATION__",
+            "axis": "NUMEROS",
+            "unit_name": "Gamification",
+            "mastery_score": 0.5,
+            "knowledge_gap_index": 0.0,
+            "conceptual_error_index": 0.0,
+            "correct_count": int(profile.elo_rating),
+            "incorrect_count": int(profile.duel_wins),
+            "omitted_count": int(profile.duel_losses),
+            "total_seen": int(profile.duel_draws),
+        }
+
+        # Enviar exactamente las columnas de la tabla SQL gopaes_profiles
+        sql_payload = {
+            "username": full_dump["username"],
+            "password_hash": full_dump.get("password_hash", ""),
+            "password_salt": full_dump.get("password_salt", ""),
+            "created_at": full_dump.get("created_at", ""),
+            "last_activity_date": full_dump.get("last_activity_date", ""),
+            "study_streak": full_dump.get("study_streak", 1),
+            "completed_exams": full_dump.get("completed_exams", 0),
+            "diagnostic_completed": full_dump.get("diagnostic_completed", False),
+            "axes_state": full_dump.get("axes_state", {}),
+            "micro_units_state": mu_copy,
+            "logs": full_dump.get("logs", []),
+        }
         try:
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=12)
+            resp = requests.post(endpoint, json=sql_payload, headers=headers, timeout=12)
             return resp.status_code in (200, 201)
         except Exception:
             return False
+
+    @classmethod
+    def fetch_all_profiles_for_leaderboard(cls) -> List[UserProfileData]:
+        """
+        Obtiene todos los perfiles de estudiantes desde Supabase + almacenamiento local
+        para construir el Ranking Global y Ligas en tiempo real.
+        """
+        profiles_by_name: Dict[str, UserProfileData] = {}
+        local_data = cls._ensure_storage()
+        for uname, raw_d in local_data.items():
+            if uname.startswith("__GOPAES_"):
+                continue
+            try:
+                profiles_by_name[uname] = cls._unpack_gamification_from_raw(dict(raw_d))
+            except Exception:
+                pass
+
+        url, key, _ = cls.resolve_supabase_credentials()
+        if url and key:
+            endpoint = f"{url}/rest/v1/gopaes_profiles?select=*"
+            try:
+                resp = requests.get(endpoint, headers=cls._supabase_headers(key), timeout=10)
+                if resp.status_code == 200:
+                    for row in resp.json():
+                        uname = row.get("username", "")
+                        if not uname or uname.startswith("__GOPAES_"):
+                            continue
+                        try:
+                            profiles_by_name[uname] = cls._unpack_gamification_from_raw(row)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        ranked = list(profiles_by_name.values())
+        ranked.sort(key=lambda p: (p.elo_rating, p.duel_wins, p.study_streak), reverse=True)
+        return ranked
 
     @classmethod
     def _supabase_list_usernames(cls) -> List[str]:
