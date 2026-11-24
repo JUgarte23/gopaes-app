@@ -443,11 +443,16 @@ def get_profile_wins(prof) -> int:
     return 0
 
 
-def set_profile_elo_and_wins(prof, new_elo: int, new_wins: int, new_losses: int = 0):
+def set_profile_elo_and_wins(
+    prof, new_elo: int, new_wins: int, new_losses: int | None = None, new_draws: int | None = None
+):
     try:
         prof.elo_rating = new_elo
         prof.duel_wins = new_wins
-        prof.duel_losses = new_losses
+        if new_losses is not None:
+            prof.duel_losses = new_losses
+        if new_draws is not None:
+            prof.duel_draws = new_draws
     except Exception:
         pass
     GoPAESProfileManager.save_profile(prof)
@@ -1368,12 +1373,12 @@ elif st.session_state.nav_section == "DUEL_1V1":
 
         col_quick, col_room = st.columns(2)
 
-        # Opción A: Emparejamiento Rápido 1v1 en tu Liga
+        # Opción A: Emparejamiento Rápido 1v1 en tu Liga (prioriza desafíos reales abiertos)
         with col_quick:
             with st.container(border=True):
                 st.subheader("⚡ Emparejamiento Rápido 1v1")
                 st.write(
-                    "Busca automáticamente un rival de tu liga o un desafío abierto en la nube para competir ahora mismo en 5 preguntas:"
+                    "Busca automáticamente un desafío 1v1 abierto de otro estudiante en tu prueba o emparéjate con un rival de tu misma liga:"
                 )
                 duel_exam: ExamType = st.radio(
                     "Modalidad del Duelo:",
@@ -1384,43 +1389,79 @@ elif st.session_state.nav_section == "DUEL_1V1":
                 )
 
                 if st.button("⚔️ Buscar Rival y Jugar 1v1 Ahora", type="primary", use_container_width=True):
-                    # Seleccionar rival de nivel cercano en el Ranking Global
-                    candidates = [p for p in leaderboard_data if p["username"].lower() != profile.username.lower()]
-                    candidates.sort(key=lambda x: abs(x["elo"] - user_elo))
-                    chosen_opp = candidates[0] if candidates else {"username": "Matias_DEMRE", "elo": 1020}
-
-                    duel_qs = engine.build_exam_question_queue(
-                        vector_store=st.session_state.vector_store,
-                        exam=duel_exam,
-                        num_questions=5,
-                        mode="GENERAL_STANDARD",
-                        asked_ids=st.session_state.asked_ids,
+                    rooms_now = load_shared_duel_rooms()
+                    matching_human_room = next(
+                        (
+                            r
+                            for r in reversed(rooms_now)
+                            if r.get("creator", "").lower() != profile.username.lower()
+                            and r.get("exam") == duel_exam
+                            and r.get("creator_score") is not None
+                            and not r.get("challenger")
+                        ),
+                        None,
                     )
-                    # Simular desempeño calibrado del rival según su ELO y dificultad de cada pregunta
-                    rng = random.Random(f"{profile.username}_{chosen_opp['username']}_{len(st.session_state.asked_ids)}")
-                    opp_prob = min(0.88, max(0.35, 0.55 + (chosen_opp["elo"] - 1000) / 1000.0))
-                    opp_ans = [rng.random() < opp_prob for _ in duel_qs]
 
-                    st.session_state.duel_state = {
-                        "phase": "ACTIVE_DUEL",
-                        "room_code": f"LIVE-{random.randint(1000, 9999)}",
-                        "exam": duel_exam,
-                        "opponent_name": chosen_opp["username"],
-                        "opponent_elo": chosen_opp["elo"],
-                        "opponent_answers": opp_ans,
-                        "questions": duel_qs,
-                        "player_history": [],
-                        "elo_delta": 0,
-                        "is_room_creator": False,
-                    }
+                    if matching_human_room:
+                        all_map = {n.node_id: n for n in st.session_state.vector_store.get_all_nodes()}
+                        q_objs = [all_map[qid] for qid in matching_human_room.get("question_ids", []) if qid in all_map]
+                        if not q_objs:
+                            q_objs = engine.build_exam_question_queue(
+                                st.session_state.vector_store, duel_exam, 5, "GENERAL_STANDARD", st.session_state.asked_ids
+                            )
+                        c_answers = matching_human_room.get("creator_answers")
+                        if not isinstance(c_answers, list) or len(c_answers) != len(q_objs):
+                            c_sc = int(matching_human_room.get("creator_score", 3))
+                            c_answers = [i < c_sc for i in range(len(q_objs))]
+
+                        st.session_state.duel_state = {
+                            "phase": "ACTIVE_DUEL",
+                            "room_code": matching_human_room["room_code"],
+                            "exam": duel_exam,
+                            "opponent_name": matching_human_room["creator"],
+                            "opponent_elo": matching_human_room.get("creator_elo", 1000),
+                            "opponent_answers": c_answers,
+                            "questions": q_objs,
+                            "player_history": [],
+                            "elo_delta": 0,
+                            "is_room_creator": False,
+                        }
+                    else:
+                        candidates = [p for p in leaderboard_data if p["username"].lower() != profile.username.lower()]
+                        candidates.sort(key=lambda x: abs(x["elo"] - user_elo))
+                        chosen_opp = candidates[0] if candidates else {"username": "Matias_DEMRE", "elo": 1020}
+
+                        duel_qs = engine.build_exam_question_queue(
+                            vector_store=st.session_state.vector_store,
+                            exam=duel_exam,
+                            num_questions=5,
+                            mode="GENERAL_STANDARD",
+                            asked_ids=st.session_state.asked_ids,
+                        )
+                        rng = random.Random(f"{profile.username}_{chosen_opp['username']}_{len(st.session_state.asked_ids)}")
+                        opp_prob = min(0.88, max(0.35, 0.55 + (chosen_opp["elo"] - 1000) / 1000.0))
+                        opp_ans = [rng.random() < opp_prob for _ in duel_qs]
+
+                        st.session_state.duel_state = {
+                            "phase": "ACTIVE_DUEL",
+                            "room_code": f"LIVE-{random.randint(1000, 9999)}",
+                            "exam": duel_exam,
+                            "opponent_name": chosen_opp["username"],
+                            "opponent_elo": chosen_opp["elo"],
+                            "opponent_answers": opp_ans,
+                            "questions": duel_qs,
+                            "player_history": [],
+                            "elo_delta": 0,
+                            "is_room_creator": False,
+                        }
                     st.rerun()
 
-        # Opción B: Crear o Unirse a una Sala Multijugador con Código entre Amigos
+        # Opción B: Crear o Unirse a una Sala Multijugador 1v1 con Código entre Amigos
         with col_room:
             with st.container(border=True):
-                st.subheader("🏠 Sala de Duelo con Código (Contra un Amigo)")
+                st.subheader("🏠 Sala 1v1 con Código (Contra un Amigo)")
                 st.write(
-                    "Crea una sala compartida en la nube y pásale el código a tu amigo para que ambos resuelvan las **mismas 5 preguntas**:"
+                    "Crea una sala 1v1 en la nube, responde tus 5 preguntas y comparte el código para que tu amigo juegue exactamente las **mismas 5 preguntas**:"
                 )
                 c_create, c_join = st.columns(2)
                 with c_create:
@@ -1442,8 +1483,10 @@ elif st.session_state.nav_section == "DUEL_1V1":
                             "exam": room_exam,
                             "question_ids": [q.node_id for q in duel_qs],
                             "creator_score": None,
+                            "creator_answers": [],
                             "challenger": None,
                             "challenger_score": None,
+                            "challenger_answers": [],
                             "created_at": datetime.date.today().isoformat(),
                         })
                         save_shared_duel_rooms(rooms)
@@ -1452,9 +1495,9 @@ elif st.session_state.nav_section == "DUEL_1V1":
                             "phase": "ACTIVE_DUEL",
                             "room_code": code,
                             "exam": room_exam,
-                            "opponent_name": "Esperando Amigo (Sala " + code + ")",
+                            "opponent_name": f"Esperando Rival ({code})",
                             "opponent_elo": user_elo,
-                            "opponent_answers": [True, False, True, True, False],
+                            "opponent_answers": [],
                             "questions": duel_qs,
                             "player_history": [],
                             "elo_delta": 0,
@@ -1474,7 +1517,9 @@ elif st.session_state.nav_section == "DUEL_1V1":
                         rooms = load_shared_duel_rooms()
                         found_room = next((r for r in rooms if r.get("room_code", "").upper() == clean_code), None)
                         if not found_room:
-                            st.error(f"No se encontró la sala '{clean_code}'. Verifica el código.")
+                            st.error(f"No se encontró la sala '{clean_code}'. Verifica el código con tu amigo.")
+                        elif found_room.get("creator", "").lower() == profile.username.lower():
+                            st.warning("No puedes desafiarte a ti mismo en tu propia sala. Comparte este código con un amigo.")
                         else:
                             all_map = {n.node_id: n for n in st.session_state.vector_store.get_all_nodes()}
                             q_objs = [all_map[qid] for qid in found_room.get("question_ids", []) if qid in all_map]
@@ -1482,8 +1527,10 @@ elif st.session_state.nav_section == "DUEL_1V1":
                                 q_objs = engine.build_exam_question_queue(
                                     st.session_state.vector_store, found_room.get("exam", "M1"), 5, "GENERAL_STANDARD", []
                                 )
-                            creator_sc = found_room.get("creator_score")
-                            c_ans = [i < (creator_sc if creator_sc is not None else 3) for i in range(len(q_objs))]
+                            c_ans = found_room.get("creator_answers")
+                            if not isinstance(c_ans, list) or len(c_ans) != len(q_objs):
+                                c_sc = found_room.get("creator_score")
+                                c_ans = [i < (c_sc if c_sc is not None else 3) for i in range(len(q_objs))]
                             st.session_state.duel_state = {
                                 "phase": "ACTIVE_DUEL",
                                 "room_code": found_room["room_code"],
@@ -1498,19 +1545,26 @@ elif st.session_state.nav_section == "DUEL_1V1":
                             }
                             st.rerun()
 
-        # Lista de Salas / Desafíos Abiertos en la Nube
+        # Lista de Salas Abiertas por Otros Estudiantes + Mis Salas Creadas
         rooms_list = load_shared_duel_rooms()
-        open_rooms = [r for r in reversed(rooms_list) if r.get("creator") != profile.username][:5]
+        open_rooms = [
+            r for r in reversed(rooms_list)
+            if r.get("creator", "").lower() != profile.username.lower() and r.get("creator_score") is not None
+        ][:5]
+        my_rooms = [
+            r for r in reversed(rooms_list)
+            if r.get("creator", "").lower() == profile.username.lower()
+        ][:4]
+
         if open_rooms:
             with st.container(border=True):
                 st.markdown("#### 🌐 Desafíos 1v1 Abiertos por Otros Estudiantes")
                 for r in open_rooms:
-                    c_r1, c_r2, c_r3, c_r4 = st.columns([1.5, 1.5, 1.5, 1.2])
+                    c_r1, c_r2, c_r3, c_r4 = st.columns([1.4, 1.6, 1.8, 1.2])
                     c_r1.markdown(f"**Sala:** `{r['room_code']}`")
                     c_r2.markdown(f"👤 **{r['creator']}** (`{r.get('creator_elo', 1000)} ELO`)")
                     c_r3.markdown(
-                        f"📘 PAES **{r.get('exam', 'M1')}** • Puntaje a batir: "
-                        f"**{r['creator_score'] if r.get('creator_score') is not None else '?'}/5**"
+                        f"📘 PAES **{r.get('exam', 'M1')}** • Puntaje a batir: **{r['creator_score']}/5**"
                     )
                     with c_r4:
                         if st.button("⚔️ Aceptar Duelo", key=f"accept_room_{r['room_code']}", use_container_width=True):
@@ -1520,8 +1574,10 @@ elif st.session_state.nav_section == "DUEL_1V1":
                                 q_objs = engine.build_exam_question_queue(
                                     st.session_state.vector_store, r.get("exam", "M1"), 5, "GENERAL_STANDARD", []
                                 )
-                            c_sc = r.get("creator_score") if r.get("creator_score") is not None else 3
-                            c_ans = [i < c_sc for i in range(len(q_objs))]
+                            c_ans = r.get("creator_answers")
+                            if not isinstance(c_ans, list) or len(c_ans) != len(q_objs):
+                                c_sc = int(r.get("creator_score", 3))
+                                c_ans = [i < c_sc for i in range(len(q_objs))]
                             st.session_state.duel_state = {
                                 "phase": "ACTIVE_DUEL",
                                 "room_code": r["room_code"],
@@ -1536,67 +1592,118 @@ elif st.session_state.nav_section == "DUEL_1V1":
                             }
                             st.rerun()
 
+        if my_rooms:
+            with st.container(border=True):
+                st.markdown("#### 📋 Mis Salas 1v1 Creadas")
+                for mr in my_rooms:
+                    c_m1, c_m2, c_m3 = st.columns([1.4, 2.0, 2.2])
+                    c_m1.markdown(f"**Código:** `{mr['room_code']}` ({mr.get('exam', 'M1')})")
+                    c_m2.markdown(f"Tu puntaje: **{mr['creator_score'] if mr.get('creator_score') is not None else 'Pendiente'}/5**")
+                    if mr.get("challenger"):
+                        c_m3.markdown(
+                            f"⚔️ Rival: **{mr['challenger']}** ({mr.get('challenger_score', 0)}/5)"
+                        )
+                    else:
+                        c_m3.caption("⏳ Esperando a que un amigo ingrese el código...")
+
     elif ds["phase"] == "ACTIVE_DUEL":
         step = len(ds["player_history"])
         total_duel_q = len(ds["questions"])
+        is_creator_waiting = bool(ds.get("is_room_creator"))
 
         player_pts = sum(1 for h in ds["player_history"] if h["state"] == "CORRECT")
-        opp_pts = sum(1 for b in ds["opponent_answers"][:step] if b)
+        opp_pts = sum(1 for b in ds["opponent_answers"][:step] if b) if not is_creator_waiting else None
+
+        # Indicadores visuales ronda por ronda (✅ ❌ ⬜)
+        p_dots = " ".join(
+            ("✅" if h["state"] == "CORRECT" else "❌") for h in ds["player_history"]
+        ) + " " + " ".join(["⬜"] * (total_duel_q - step))
+
+        if not is_creator_waiting:
+            o_dots = " ".join(
+                ("✅" if b else "❌") for b in ds["opponent_answers"][:step]
+            ) + " " + " ".join(["⬜"] * (total_duel_q - step))
+        else:
+            o_dots = "⏳ Esperando al rival"
 
         # Marcador 1v1 en Vivo en la parte superior
         with st.container(border=True):
-            c_p1, c_vs, c_p2 = st.columns([2, 1, 2])
+            c_p1, c_vs, c_p2 = st.columns([2, 1.2, 2])
             with c_p1:
                 st.markdown(
                     f"### 🟦 {profile.username} (`{user_elo} ELO`)\n"
-                    f"#### Puntaje: **{player_pts} / {total_duel_q}**"
+                    f"**Puntaje: {player_pts} / {total_duel_q}** &nbsp; {p_dots}"
                 )
             with c_vs:
                 st.markdown(
-                    f"<div style='text-align:center; padding-top:10px;'>"
-                    f"<span style='background:#EEF2FF; color:#4F46E5; padding:6px 14px; border-radius:999px; font-weight:800;'>"
-                    f"Sala {ds['room_code']}</span><br><h3 style='margin:6px 0;'>⚔️ VS</h3></div>",
+                    f"<div style='text-align:center; padding-top:4px;'>"
+                    f"<span style='background:#EEF2FF; color:#4F46E5; padding:5px 12px; border-radius:999px; font-weight:800; font-size:0.82rem;'>"
+                    f"Sala {ds['room_code']}</span><br><h3 style='margin:6px 0;'>⚔️ 1 vs 1</h3></div>",
                     unsafe_allow_html=True,
                 )
+                if st.button("⬅️ Salir", type="secondary", use_container_width=True, key="btn_exit_active_duel"):
+                    ds["phase"] = "LOBBY"
+                    st.rerun()
             with c_p2:
-                st.markdown(
-                    f"<div style='text-align:right;'>"
-                    f"<h3>🟥 {ds['opponent_name']} (<code>{ds['opponent_elo']} ELO</code>)</h3>"
-                    f"<h4>Puntaje: <b>{opp_pts} / {total_duel_q}</b></h4></div>",
-                    unsafe_allow_html=True,
-                )
+                if is_creator_waiting:
+                    st.markdown(
+                        f"<div style='text-align:right;'>"
+                        f"<h3>⏳ Amigo por unirse</h3>"
+                        f"<b>Código: <code>{ds['room_code']}</code></b><br>{o_dots}</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"<div style='text-align:right;'>"
+                        f"<h3>🟥 {ds['opponent_name']} (<code>{ds['opponent_elo']} ELO</code>)</h3>"
+                        f"<b>Puntaje: {opp_pts} / {total_duel_q}</b> &nbsp; {o_dots}</div>",
+                        unsafe_allow_html=True,
+                    )
 
         if step >= total_duel_q:
-            # Calcular resultado final y actualizar ELO
-            final_opp_pts = sum(1 for b in ds["opponent_answers"][:total_duel_q] if b)
-            if player_pts > final_opp_pts:
-                outcome = 1.0
-                new_wins = user_wins + 1
-            elif player_pts == final_opp_pts:
-                outcome = 0.5
-                new_wins = user_wins
-            else:
-                outcome = 0.0
-                new_wins = user_wins
-
-            delta_elo = calculate_elo_change(user_elo, ds["opponent_elo"], outcome)
-            new_elo = max(800, user_elo + delta_elo)
-            set_profile_elo_and_wins(profile, new_elo=new_elo, new_wins=new_wins)
-
-            # Si era sala compartida, guardar el puntaje del creador o retador en la nube
-            rooms = load_shared_duel_rooms()
-            for r in rooms:
-                if r.get("room_code") == ds["room_code"]:
-                    if ds.get("is_room_creator"):
+            player_bool_list = [h["state"] == "CORRECT" for h in ds["player_history"]]
+            if is_creator_waiting:
+                # El creador registró su marca real en la sala y espera a su amigo
+                rooms = load_shared_duel_rooms()
+                for r in rooms:
+                    if r.get("room_code") == ds["room_code"]:
                         r["creator_score"] = player_pts
-                    else:
+                        r["creator_answers"] = player_bool_list
+                save_shared_duel_rooms(rooms)
+                ds["elo_delta"] = 0
+                ds["phase"] = "DUEL_RESULTS"
+                st.rerun()
+            else:
+                final_opp_pts = sum(1 for b in ds["opponent_answers"][:total_duel_q] if b)
+                cur_losses = getattr(profile, "duel_losses", 0)
+                cur_draws = getattr(profile, "duel_draws", 0)
+                if player_pts > final_opp_pts:
+                    outcome = 1.0
+                    new_wins, new_losses, new_draws = user_wins + 1, cur_losses, cur_draws
+                elif player_pts == final_opp_pts:
+                    outcome = 0.5
+                    new_wins, new_losses, new_draws = user_wins, cur_losses, cur_draws + 1
+                else:
+                    outcome = 0.0
+                    new_wins, new_losses, new_draws = user_wins, cur_losses + 1, cur_draws
+
+                delta_elo = calculate_elo_change(user_elo, ds["opponent_elo"], outcome)
+                new_elo = max(800, user_elo + delta_elo)
+                set_profile_elo_and_wins(
+                    profile, new_elo=new_elo, new_wins=new_wins, new_losses=new_losses, new_draws=new_draws
+                )
+
+                rooms = load_shared_duel_rooms()
+                for r in rooms:
+                    if r.get("room_code") == ds["room_code"]:
                         r["challenger"] = profile.username
                         r["challenger_score"] = player_pts
-            save_shared_duel_rooms(rooms)
+                        r["challenger_answers"] = player_bool_list
+                save_shared_duel_rooms(rooms)
 
-            ds["elo_delta"] = delta_elo
-            ds["phase"] = "DUEL_RESULTS"
-            st.rerun()
+                ds["elo_delta"] = delta_elo
+                ds["phase"] = "DUEL_RESULTS"
+                st.rerun()
 
         q_duel: DEMREQuestionNode = ds["questions"][step]
         with st.container(border=True):
@@ -1627,32 +1734,51 @@ elif st.session_state.nav_section == "DUEL_1V1":
     elif ds["phase"] == "DUEL_RESULTS":
         total_duel_q = len(ds["questions"])
         player_pts = sum(1 for h in ds["player_history"] if h["state"] == "CORRECT")
-        final_opp_pts = sum(1 for b in ds["opponent_answers"][:total_duel_q] if b)
-        delta_elo = ds["elo_delta"]
-        sign_str = f"+{delta_elo}" if delta_elo >= 0 else f"{delta_elo}"
+        is_creator_waiting = bool(ds.get("is_room_creator"))
 
-        if player_pts > final_opp_pts:
-            st.balloons()
-            st.success(
-                f"🏆 **¡VICTORIA EN EL DUELO 1v1!** Venciste a **{ds['opponent_name']}** por **{player_pts} a {final_opp_pts}**. "
-                f"Tu Rating ELO sube en **`{sign_str} ELO`** (Nuevo Rating: **{get_profile_elo(profile)} ELO**)."
-            )
-        elif player_pts == final_opp_pts:
-            st.info(
-                f"🤝 **¡EMPATE TÉCNICO!** Igualaste **{player_pts} a {final_opp_pts}** contra **{ds['opponent_name']}**. "
-                f"Variación ELO: **`{sign_str} ELO`**."
-            )
+        if is_creator_waiting:
+            # Revisar si un amigo ya aceptó y terminó la sala en la nube
+            rooms_latest = load_shared_duel_rooms()
+            my_room = next((r for r in rooms_latest if r.get("room_code") == ds["room_code"]), None)
+            if my_room and my_room.get("challenger"):
+                ch_name = my_room["challenger"]
+                ch_pts = int(my_room.get("challenger_score", 0))
+                if player_pts > ch_pts:
+                    st.balloons()
+                    st.success(f"🏆 **¡GANASTE EL DUELO 1v1!** Superaste a **{ch_name}** por **{player_pts} a {ch_pts}**.")
+                elif player_pts == ch_pts:
+                    st.info(f"🤝 **¡EMPATE 1v1!** Igualaste **{player_pts} a {ch_pts}** frente a **{ch_name}**.")
+                else:
+                    st.error(f"⚔️ **{ch_name} ganó esta ronda** con **{ch_pts}/{total_duel_q}** frente a tus **{player_pts}/{total_duel_q}**.")
+            else:
+                st.success(
+                    f"✅ **¡Tu marca de {player_pts}/{total_duel_q} quedó registrada en la Sala 1v1!**  \n"
+                    f"Comparte este código con tu amigo para que resuelva las mismas 5 preguntas:"
+                )
+                st.code(ds["room_code"], language="text")
+                if st.button("🔄 Actualizar para ver si tu amigo ya jugó", type="secondary"):
+                    st.rerun()
         else:
-            st.error(
-                f"⚔️ **Duelo finalizado:** **{ds['opponent_name']}** obtuvo **{final_opp_pts}/{total_duel_q}** y tú obtuviste **{player_pts}/{total_duel_q}**. "
-                f"Variación ELO: **`{sign_str} ELO`**. ¡Revisa las explicaciones abajo para la revancha!"
-            )
+            final_opp_pts = sum(1 for b in ds["opponent_answers"][:total_duel_q] if b)
+            delta_elo = ds["elo_delta"]
+            sign_str = f"+{delta_elo}" if delta_elo >= 0 else f"{delta_elo}"
 
-        if ds.get("is_room_creator"):
-            st.info(
-                f"📢 **Comparte este Código de Sala con tu amigo para que intente superar tu puntaje ({player_pts}/5):**  \n"
-                f"### `{ds['room_code']}`"
-            )
+            if player_pts > final_opp_pts:
+                st.balloons()
+                st.success(
+                    f"🏆 **¡VICTORIA EN EL DUELO 1v1!** Venciste a **{ds['opponent_name']}** por **{player_pts} a {final_opp_pts}**. "
+                    f"Tu Rating ELO sube en **`{sign_str} ELO`** (Nuevo Rating: **{get_profile_elo(profile)} ELO**)."
+                )
+            elif player_pts == final_opp_pts:
+                st.info(
+                    f"🤝 **¡EMPATE TÉCNICO 1v1!** Igualaste **{player_pts} a {final_opp_pts}** contra **{ds['opponent_name']}**. "
+                    f"Variación ELO: **`{sign_str} ELO`**."
+                )
+            else:
+                st.error(
+                    f"⚔️ **Duelo 1v1 finalizado:** **{ds['opponent_name']}** obtuvo **{final_opp_pts}/{total_duel_q}** y tú obtuviste **{player_pts}/{total_duel_q}**. "
+                    f"Variación ELO: **`{sign_str} ELO`**. ¡Revisa las explicaciones abajo para la revancha!"
+                )
 
         c_b1, c_b2 = st.columns(2)
         with c_b1:
@@ -1670,6 +1796,7 @@ elif st.session_state.nav_section == "DUEL_1V1":
             qd: DEMREQuestionNode = item_h["question"]
             sel_d = item_h["selected_option"]
             st_d = item_h["state"]
+            duel_cache_key = f"duel_{ds['room_code']}_{idx_h}_{qd.node_id}_{sel_d}_{st_d}"
             with st.container(border=True):
                 if st_d == "CORRECT":
                     st.success(f"**Pregunta {idx_h}:** ✅ Correcta (Marcaste {sel_d})")
@@ -1677,10 +1804,12 @@ elif st.session_state.nav_section == "DUEL_1V1":
                     st.error(f"**Pregunta {idx_h}:** ❌ Marcaste {sel_d} • Clave Oficial DEMRE: **{qd.correct_option})**")
                 st.write(qd.stem_text)
                 st.latex(qd.stem_latex)
-                explanation = GoPAESLLMCoach.generate_live_latex_explanation(
-                    question=qd, selected_option=sel_d, state=st_d
-                )
-                st.markdown(explanation)
+                if duel_cache_key not in st.session_state.ai_explanations_cache:
+                    with st.spinner(f"🤖 Generando explicación paso a paso para la Pregunta {idx_h}..."):
+                        st.session_state.ai_explanations_cache[duel_cache_key] = GoPAESLLMCoach.generate_live_latex_explanation(
+                            question=qd, selected_option=sel_d, state=st_d
+                        )
+                st.markdown(st.session_state.ai_explanations_cache[duel_cache_key])
 
 
 # =====================================================================
